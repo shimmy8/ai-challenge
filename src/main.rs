@@ -510,7 +510,17 @@ async fn main() -> Result<()> {
         match result {
             Ok(answer) => {
                 println!("{}\n{}\n", style("Лиса").magenta().bold(), answer.text);
-                println!("Метрики: {:.3} с; токены: {} входных + {} выходных = {} всего\n", elapsed.as_secs_f64(), answer.input_tokens, answer.output_tokens, answer.total_tokens);
+                println!(
+                    "{}\n",
+                    style(format!(
+                        "Метрики: {:.3} с; токены: {} входных + {} выходных = {} всего",
+                        elapsed.as_secs_f64(),
+                        answer.input_tokens,
+                        answer.output_tokens,
+                        answer.total_tokens
+                    ))
+                    .dim()
+                );
                 history.push(Message {
                     role: "assistant",
                     content: answer.text,
