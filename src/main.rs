@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use console::{style, Key, Term};
-use dialoguer::{theme::ColorfulTheme, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use reqwest::{Client, StatusCode};
 use rustyline::{
     completion::{Completer, Pair},
@@ -14,6 +14,7 @@ use rustyline::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    borrow::Cow,
     fmt, fs,
     io::Write,
     path::{Path, PathBuf},
@@ -24,6 +25,7 @@ const OPENAI_KEYS_URL: &str = "https://platform.openai.com/api-keys";
 const CLAUDE_KEYS_URL: &str = "https://console.anthropic.com/settings/keys";
 const COMMANDS: &[(&str, &str)] = &[
     ("/provider", "сменить провайдера"),
+    ("/mode", "выбрать или создать режим ответа"),
     ("/new", "начать новую сессию"),
     ("/help", "показать подсказку"),
     ("/quit", "выйти"),
@@ -90,7 +92,17 @@ impl fmt::Display for Provider {
 #[derive(Debug, Serialize, Deserialize)]
 struct Config {
     last_provider: Option<Provider>,
+    #[serde(default)]
+    last_mode: Option<String>,
+    #[serde(default)]
+    modes: Vec<ResponseMode>,
     providers: Vec<ProviderConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResponseMode {
+    name: String,
+    instructions: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -122,6 +134,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             last_provider: None,
+            last_mode: None,
+            modes: Vec::new(),
             providers: vec![
                 ProviderConfig {
                     provider: Provider::Openai,
@@ -154,6 +168,8 @@ impl Config {
             serde_json::from_value(value).context("повреждён старый файл конфигурации")?;
         let config = Self {
             last_provider: legacy.last_provider,
+            last_mode: None,
+            modes: Vec::new(),
             providers: vec![
                 ProviderConfig {
                     provider: Provider::Openai,
@@ -231,7 +247,11 @@ struct Message {
 struct CommandHelper;
 
 impl Helper for CommandHelper {}
-impl Highlighter for CommandHelper {}
+impl Highlighter for CommandHelper {
+    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+        Cow::Owned(format!("\x1b[2m{hint}\x1b[0m"))
+    }
+}
 impl Validator for CommandHelper {}
 
 impl Completer for CommandHelper {
@@ -285,10 +305,16 @@ async fn main() -> Result<()> {
     };
     authorize_if_needed(&mut config, provider, &config_path)?;
     remember_provider(&mut config, provider, &config_path)?;
+    let mut active_mode = config
+        .last_mode
+        .as_deref()
+        .and_then(|name| config.modes.iter().position(|mode| mode.name == name));
     println!(
-        "{} {}. Введите {} для списка команд.\n",
+        "{} {}. {} {}. Введите {} для списка команд.\n",
         style("Провайдер:").dim(),
         style(provider).cyan().bold(),
+        style("Режим:").dim(),
+        style(mode_name(&config, active_mode)).cyan().bold(),
         style("/help").yellow()
     );
 
@@ -306,6 +332,7 @@ async fn main() -> Result<()> {
         if input.is_empty() {
             continue;
         }
+        let input = expand_command_hint(&input).to_owned();
         let _ = editor.add_history_entry(&input);
         match input.as_str() {
             "/quit" => break,
@@ -326,6 +353,17 @@ async fn main() -> Result<()> {
                 );
                 continue;
             }
+            "/mode" => {
+                active_mode = choose_mode(&mut config, &config_path)?;
+                history.clear();
+                println!(
+                    "{} {}. {}\n",
+                    style("Режим изменён на").yellow(),
+                    style(mode_name(&config, active_mode)).cyan().bold(),
+                    style("Начата новая сессия.").dim()
+                );
+                continue;
+            }
             "/help" => {
                 print_help();
                 continue;
@@ -342,7 +380,8 @@ async fn main() -> Result<()> {
         });
         print!("{} ", style("Лиса думает…").dim());
         std::io::stdout().flush()?;
-        let result = send_request(&client, &config, provider, &history).await;
+        let mode = active_mode.and_then(|index| config.modes.get(index));
+        let result = send_request(&client, &config, provider, &history, mode).await;
         print!("\r{}\r", " ".repeat(40));
         match result {
             Ok(answer) => {
@@ -362,6 +401,17 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn expand_command_hint(input: &str) -> &str {
+    if !input.starts_with('/') || input.contains(char::is_whitespace) {
+        return input;
+    }
+    COMMANDS
+        .iter()
+        .map(|(command, _)| *command)
+        .find(|command| command.starts_with(input))
+        .unwrap_or(input)
+}
+
 fn config_path() -> Result<PathBuf> {
     Ok(std::env::current_dir()
         .context("не удалось определить текущую директорию")?
@@ -375,8 +425,104 @@ fn print_banner() {
 }
 
 fn print_help() {
-    println!("\n  {}  сменить провайдера\n  {}       новая сессия\n  {}      выйти\n  {}      эта подсказка\n",
-        style("/provider").yellow(), style("/new").yellow(), style("/quit").yellow(), style("/help").yellow());
+    println!("\n  {}  сменить провайдера\n  {}      выбрать или создать режим ответа\n  {}       новая сессия\n  {}      выйти\n  {}      эта подсказка\n",
+        style("/provider").yellow(), style("/mode").yellow(), style("/new").yellow(), style("/quit").yellow(), style("/help").yellow());
+}
+
+fn mode_name(config: &Config, active_mode: Option<usize>) -> &str {
+    active_mode
+        .and_then(|index| config.modes.get(index))
+        .map(|mode| mode.name.as_str())
+        .unwrap_or("Без ограничений")
+}
+
+fn choose_mode(config: &mut Config, path: &Path) -> Result<Option<usize>> {
+    let mut choices = vec!["Без ограничений".to_owned()];
+    choices.extend(config.modes.iter().map(|mode| mode.name.clone()));
+    choices.push("＋ Создать новый режим".to_owned());
+    let selected = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Выберите режим ответа")
+        .items(&choices)
+        .default(0)
+        .interact()?;
+
+    if selected == 0 {
+        config.last_mode = None;
+        config.save(path)?;
+        return Ok(None);
+    }
+    if selected <= config.modes.len() {
+        let index = selected - 1;
+        config.last_mode = Some(config.modes[index].name.clone());
+        config.save(path)?;
+        return Ok(Some(index));
+    }
+
+    let mode = create_mode()?;
+    let name = mode.name.clone();
+    let index = if let Some(index) = config
+        .modes
+        .iter()
+        .position(|existing| existing.name == name)
+    {
+        let overwrite = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!("Режим «{name}» уже существует. Заменить его?"))
+            .default(false)
+            .interact()?;
+        if !overwrite {
+            bail!("создание режима отменено");
+        }
+        config.modes[index] = mode;
+        index
+    } else {
+        config.modes.push(mode);
+        config.modes.len() - 1
+    };
+    config.last_mode = Some(name);
+    config.save(path)?;
+    Ok(Some(index))
+}
+
+fn create_mode() -> Result<ResponseMode> {
+    let name: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Название режима")
+        .validate_with(|value: &String| -> std::result::Result<(), &str> {
+            if value.trim().is_empty() {
+                Err("название не может быть пустым")
+            } else {
+                Ok(())
+            }
+        })
+        .interact_text()?;
+    let name = name.trim().to_owned();
+    if name == "Без ограничений" {
+        bail!("режим с названием «{name}» уже существует");
+    }
+
+    let instructions = prompt_multiline("Инструкции (формат, стиль и другие требования)")?;
+    Ok(ResponseMode { name, instructions })
+}
+
+fn prompt_multiline(prompt: &str) -> Result<String> {
+    println!("{prompt}");
+    println!(
+        "{}",
+        style("Вставьте многострочный текст и завершите отдельной строкой /done.").dim()
+    );
+    let stdin = std::io::stdin();
+    let mut lines = Vec::new();
+    loop {
+        let mut line = String::new();
+        if stdin.read_line(&mut line)? == 0 {
+            bail!("ввод инструкций прерван");
+        }
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line == "/done" {
+            break;
+        }
+        lines.push(line.to_owned());
+    }
+    Ok(lines.join("\n").trim().to_owned())
 }
 
 fn choose_provider() -> Result<Provider> {
@@ -475,14 +621,26 @@ async fn send_request(
     config: &Config,
     provider: Provider,
     history: &[Message],
+    mode: Option<&ResponseMode>,
 ) -> Result<String> {
     match provider {
-        Provider::Openai => send_openai(client, config, history).await,
-        Provider::Claude => send_claude(client, config, history).await,
+        Provider::Openai => send_openai(client, config, history, mode).await,
+        Provider::Claude => send_claude(client, config, history, mode).await,
     }
 }
 
-async fn send_openai(client: &Client, config: &Config, history: &[Message]) -> Result<String> {
+async fn send_openai(
+    client: &Client,
+    config: &Config,
+    history: &[Message],
+    mode: Option<&ResponseMode>,
+) -> Result<String> {
+    let mut payload = json!({ "model": config.model(Provider::Openai)?, "input": history });
+    if let Some(mode) = mode {
+        if !mode.instructions.is_empty() {
+            payload["instructions"] = json!(mode.instructions);
+        }
+    }
     let response = client
         .post("https://api.openai.com/v1/responses")
         .bearer_auth(
@@ -490,7 +648,7 @@ async fn send_openai(client: &Client, config: &Config, history: &[Message]) -> R
                 .key(Provider::Openai)
                 .ok_or_else(|| anyhow!("нет ключа OpenAI"))?,
         )
-        .json(&json!({ "model": config.model(Provider::Openai)?, "input": history }))
+        .json(&payload)
         .send()
         .await
         .context("не удалось подключиться к OpenAI")?;
@@ -499,7 +657,20 @@ async fn send_openai(client: &Client, config: &Config, history: &[Message]) -> R
     extract_openai_text(&body)
 }
 
-async fn send_claude(client: &Client, config: &Config, history: &[Message]) -> Result<String> {
+async fn send_claude(
+    client: &Client,
+    config: &Config,
+    history: &[Message],
+    mode: Option<&ResponseMode>,
+) -> Result<String> {
+    let mut payload = json!({
+        "model": config.model(Provider::Claude)?,
+        "max_tokens": 4096,
+        "messages": history
+    });
+    if let Some(mode) = mode.filter(|mode| !mode.instructions.is_empty()) {
+        payload["system"] = json!(mode.instructions);
+    }
     let response = client
         .post("https://api.anthropic.com/v1/messages")
         .header(
@@ -509,7 +680,7 @@ async fn send_claude(client: &Client, config: &Config, history: &[Message]) -> R
                 .ok_or_else(|| anyhow!("нет ключа Claude"))?,
         )
         .header("anthropic-version", "2023-06-01")
-        .json(&json!({ "model": config.model(Provider::Claude)?, "max_tokens": 4096, "messages": history }))
+        .json(&payload)
         .send()
         .await
         .context("не удалось подключиться к Anthropic")?;
@@ -605,14 +776,23 @@ mod tests {
     fn config_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let mut config = Config::default();
-        config.last_provider = Some(Provider::Claude);
+        let mut config = Config {
+            last_provider: Some(Provider::Claude),
+            ..Config::default()
+        };
         config.set_key(Provider::Claude, "secret".into());
+        config.modes.push(ResponseMode {
+            name: "Кратко".into(),
+            instructions: "Ответь одним предложением".into(),
+        });
+        config.last_mode = Some("Кратко".into());
         config.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.last_provider, Some(Provider::Claude));
         assert_eq!(loaded.key(Provider::Claude), Some("secret"));
         assert_eq!(loaded.providers.len(), 2);
+        assert_eq!(loaded.last_mode.as_deref(), Some("Кратко"));
+        assert_eq!(loaded.modes.len(), 1);
     }
 
     #[test]
@@ -650,6 +830,13 @@ mod tests {
         assert_eq!(
             CommandHelper.hint("/pro", 4, &context).as_deref(),
             Some("vider")
+        );
+        assert_eq!(expand_command_hint("/pro"), "/provider");
+        assert_eq!(expand_command_hint("обычный запрос"), "обычный запрос");
+        assert_eq!(expand_command_hint("/unknown"), "/unknown");
+        assert_eq!(
+            CommandHelper.highlight_hint("vider").as_ref(),
+            "\x1b[2mvider\x1b[0m"
         );
     }
 }
