@@ -21,6 +21,7 @@ use std::{
 };
 
 const CONFIG_FILE: &str = ".fox-llm.json";
+const MODES_FILE: &str = "fox-modes.json";
 const OPENAI_KEYS_URL: &str = "https://platform.openai.com/api-keys";
 const CLAUDE_KEYS_URL: &str = "https://console.anthropic.com/settings/keys";
 const COMMANDS: &[(&str, &str)] = &[
@@ -94,9 +95,13 @@ struct Config {
     last_provider: Option<Provider>,
     #[serde(default)]
     last_mode: Option<String>,
+    providers: Vec<ProviderConfig>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ModesConfig {
     #[serde(default)]
     modes: Vec<ResponseMode>,
-    providers: Vec<ProviderConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,7 +140,6 @@ impl Default for Config {
         Self {
             last_provider: None,
             last_mode: None,
-            modes: Vec::new(),
             providers: vec![
                 ProviderConfig {
                     provider: Provider::Openai,
@@ -169,7 +173,6 @@ impl Config {
         let config = Self {
             last_provider: legacy.last_provider,
             last_mode: None,
-            modes: Vec::new(),
             providers: vec![
                 ProviderConfig {
                     provider: Provider::Openai,
@@ -238,6 +241,23 @@ impl Config {
     }
 }
 
+impl ModesConfig {
+    fn load(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("не удалось прочитать {}", path.display()))?;
+        serde_json::from_str(&raw)
+            .with_context(|| format!("повреждён файл режимов {}", path.display()))
+    }
+
+    fn save(&self, path: &Path) -> Result<()> {
+        let raw = serde_json::to_vec_pretty(self)?;
+        fs::write(path, raw).with_context(|| format!("не удалось сохранить {}", path.display()))
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct Message {
     role: &'static str,
@@ -299,6 +319,8 @@ async fn main() -> Result<()> {
     print_banner();
     let config_path = config_path()?;
     let mut config = Config::load(&config_path)?;
+    let modes_path = modes_path()?;
+    let mut modes = ModesConfig::load(&modes_path)?;
     let mut provider = match config.last_provider {
         Some(saved) => saved,
         None => choose_provider()?,
@@ -308,13 +330,13 @@ async fn main() -> Result<()> {
     let mut active_mode = config
         .last_mode
         .as_deref()
-        .and_then(|name| config.modes.iter().position(|mode| mode.name == name));
+        .and_then(|name| modes.modes.iter().position(|mode| mode.name == name));
     println!(
         "{} {}. {} {}. Введите {} для списка команд.\n",
         style("Провайдер:").dim(),
         style(provider).cyan().bold(),
         style("Режим:").dim(),
-        style(mode_name(&config, active_mode)).cyan().bold(),
+        style(mode_name(&modes, active_mode)).cyan().bold(),
         style("/help").yellow()
     );
 
@@ -354,12 +376,12 @@ async fn main() -> Result<()> {
                 continue;
             }
             "/mode" => {
-                active_mode = choose_mode(&mut config, &config_path)?;
+                active_mode = choose_mode(&mut config, &mut modes, &config_path, &modes_path)?;
                 history.clear();
                 println!(
                     "{} {}. {}\n",
                     style("Режим изменён на").yellow(),
-                    style(mode_name(&config, active_mode)).cyan().bold(),
+                    style(mode_name(&modes, active_mode)).cyan().bold(),
                     style("Начата новая сессия.").dim()
                 );
                 continue;
@@ -380,7 +402,7 @@ async fn main() -> Result<()> {
         });
         print!("{} ", style("Лиса думает…").dim());
         std::io::stdout().flush()?;
-        let mode = active_mode.and_then(|index| config.modes.get(index));
+        let mode = active_mode.and_then(|index| modes.modes.get(index));
         let result = send_request(&client, &config, provider, &history, mode).await;
         print!("\r{}\r", " ".repeat(40));
         match result {
@@ -418,6 +440,12 @@ fn config_path() -> Result<PathBuf> {
         .join(CONFIG_FILE))
 }
 
+fn modes_path() -> Result<PathBuf> {
+    Ok(std::env::current_dir()
+        .context("не удалось определить текущую директорию")?
+        .join(MODES_FILE))
+}
+
 fn print_banner() {
     let term = Term::stdout();
     let _ = term.write_line(&style(FOX).color256(208).bold().to_string());
@@ -429,16 +457,21 @@ fn print_help() {
         style("/provider").yellow(), style("/mode").yellow(), style("/new").yellow(), style("/quit").yellow(), style("/help").yellow());
 }
 
-fn mode_name(config: &Config, active_mode: Option<usize>) -> &str {
+fn mode_name(config: &ModesConfig, active_mode: Option<usize>) -> &str {
     active_mode
         .and_then(|index| config.modes.get(index))
         .map(|mode| mode.name.as_str())
         .unwrap_or("Без ограничений")
 }
 
-fn choose_mode(config: &mut Config, path: &Path) -> Result<Option<usize>> {
+fn choose_mode(
+    config: &mut Config,
+    modes: &mut ModesConfig,
+    config_path: &Path,
+    modes_path: &Path,
+) -> Result<Option<usize>> {
     let mut choices = vec!["Без ограничений".to_owned()];
-    choices.extend(config.modes.iter().map(|mode| mode.name.clone()));
+    choices.extend(modes.modes.iter().map(|mode| mode.name.clone()));
     choices.push("＋ Создать новый режим".to_owned());
     let selected = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Выберите режим ответа")
@@ -448,19 +481,19 @@ fn choose_mode(config: &mut Config, path: &Path) -> Result<Option<usize>> {
 
     if selected == 0 {
         config.last_mode = None;
-        config.save(path)?;
+        config.save(config_path)?;
         return Ok(None);
     }
-    if selected <= config.modes.len() {
+    if selected <= modes.modes.len() {
         let index = selected - 1;
-        config.last_mode = Some(config.modes[index].name.clone());
-        config.save(path)?;
+        config.last_mode = Some(modes.modes[index].name.clone());
+        config.save(config_path)?;
         return Ok(Some(index));
     }
 
     let mode = create_mode()?;
     let name = mode.name.clone();
-    let index = if let Some(index) = config
+    let index = if let Some(index) = modes
         .modes
         .iter()
         .position(|existing| existing.name == name)
@@ -472,14 +505,15 @@ fn choose_mode(config: &mut Config, path: &Path) -> Result<Option<usize>> {
         if !overwrite {
             bail!("создание режима отменено");
         }
-        config.modes[index] = mode;
+        modes.modes[index] = mode;
         index
     } else {
-        config.modes.push(mode);
-        config.modes.len() - 1
+        modes.modes.push(mode);
+        modes.modes.len() - 1
     };
     config.last_mode = Some(name);
-    config.save(path)?;
+    modes.save(modes_path)?;
+    config.save(config_path)?;
     Ok(Some(index))
 }
 
@@ -781,10 +815,6 @@ mod tests {
             ..Config::default()
         };
         config.set_key(Provider::Claude, "secret".into());
-        config.modes.push(ResponseMode {
-            name: "Кратко".into(),
-            instructions: "Ответь одним предложением".into(),
-        });
         config.last_mode = Some("Кратко".into());
         config.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
@@ -792,7 +822,23 @@ mod tests {
         assert_eq!(loaded.key(Provider::Claude), Some("secret"));
         assert_eq!(loaded.providers.len(), 2);
         assert_eq!(loaded.last_mode.as_deref(), Some("Кратко"));
+    }
+
+    #[test]
+    fn modes_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modes.json");
+        let modes = ModesConfig {
+            modes: vec![ResponseMode {
+                name: "Кратко".into(),
+                instructions: "Ответь одним предложением".into(),
+            }],
+        };
+        modes.save(&path).unwrap();
+        let loaded = ModesConfig::load(&path).unwrap();
         assert_eq!(loaded.modes.len(), 1);
+        assert_eq!(loaded.modes[0].name, "Кратко");
+        assert_eq!(loaded.modes[0].instructions, "Ответь одним предложением");
     }
 
     #[test]
