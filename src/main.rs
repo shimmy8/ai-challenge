@@ -18,14 +18,25 @@ use std::{
     fmt, fs,
     io::Write,
     path::{Path, PathBuf},
+    time::Instant,
 };
+
+struct ApiAnswer {
+    text: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    total_tokens: u64,
+}
 
 const CONFIG_FILE: &str = ".fox-llm.json";
 const MODES_FILE: &str = "fox-modes.json";
 const OPENAI_KEYS_URL: &str = "https://platform.openai.com/api-keys";
 const CLAUDE_KEYS_URL: &str = "https://console.anthropic.com/settings/keys";
+const OPENAI_MODELS_URL: &str = "https://api.openai.com/v1/models";
+const CLAUDE_MODELS_URL: &str = "https://api.anthropic.com/v1/models";
 const COMMANDS: &[(&str, &str)] = &[
     ("/provider", "сменить провайдера"),
+    ("/model", "выбрать модель текущего провайдера"),
     ("/mode", "выбрать или создать режим ответа"),
     ("/temperature", "изменить температуру ответов"),
     ("/new", "начать новую сессию"),
@@ -252,6 +263,16 @@ impl Config {
             .ok_or_else(|| anyhow!("не найдена конфигурация для {provider}"))
     }
 
+    fn set_model(&mut self, provider: Provider, model: String) -> Result<()> {
+        let config = self
+            .providers
+            .iter_mut()
+            .find(|item| item.provider == provider)
+            .ok_or_else(|| anyhow!("не найдена конфигурация для {provider}"))?;
+        config.model = model;
+        Ok(())
+    }
+
     fn set_temperature(&mut self, provider: Provider, temperature: f64) -> Result<()> {
         let config = self
             .providers
@@ -358,9 +379,11 @@ async fn main() -> Result<()> {
         .as_deref()
         .and_then(|name| modes.modes.iter().position(|mode| mode.name == name));
     println!(
-        "{} {}. {} {}. {} {}. Введите {} для списка команд.\n",
+        "{} {}. {} {}. {} {}. {} {}. Введите {} для списка команд.\n",
         style("Провайдер:").dim(),
         style(provider).cyan().bold(),
+        style("Модель:").dim(),
+        style(config.model(provider)?).cyan().bold(),
         style("Режим:").dim(),
         style(mode_name(&modes, active_mode)).cyan().bold(),
         style("Температура:").dim(),
@@ -399,13 +422,36 @@ async fn main() -> Result<()> {
                 remember_provider(&mut config, provider, &config_path)?;
                 history.clear();
                 println!(
-                    "{} {}. {} {}\n",
+                    "{} {}. {} {}. {} {}\n",
                     style("Провайдер изменён на").yellow(),
                     style(provider).cyan().bold(),
+                    style("Модель:").dim(),
+                    style(config.model(provider)?).cyan().bold(),
                     style("Температура:").dim(),
                     style(format_temperature(config.temperature(provider)?))
                         .cyan()
                         .bold()
+                );
+                continue;
+            }
+            "/model" => {
+                let Some(model) = choose_model(&client, &config, provider).await? else {
+                    println!("{}", style("Выбор модели отменён.").dim());
+                    continue;
+                };
+                config.set_model(provider, model.clone())?;
+                let temperature =
+                    normalized_temperature(provider, &model, config.temperature(provider)?);
+                config.set_temperature(provider, temperature)?;
+                config.save(&config_path)?;
+                history.clear();
+                println!(
+                    "{} {}. {} {}. {}\n",
+                    style("Модель изменена на").yellow(),
+                    style(&model).cyan().bold(),
+                    style("Температура:").dim(),
+                    style(format_temperature(temperature)).cyan().bold(),
+                    style("Начата новая сессия.").dim()
                 );
                 continue;
             }
@@ -457,14 +503,17 @@ async fn main() -> Result<()> {
         print!("{} ", style("Лиса думает…").dim());
         std::io::stdout().flush()?;
         let mode = active_mode.and_then(|index| modes.modes.get(index));
+        let started = Instant::now();
         let result = send_request(&client, &config, provider, &history, mode).await;
+        let elapsed = started.elapsed();
         print!("\r{}\r", " ".repeat(40));
         match result {
             Ok(answer) => {
-                println!("{}\n{}\n", style("Лиса").magenta().bold(), answer);
+                println!("{}\n{}\n", style("Лиса").magenta().bold(), answer.text);
+                println!("Метрики: {:.3} с; токены: {} входных + {} выходных = {} всего\n", elapsed.as_secs_f64(), answer.input_tokens, answer.output_tokens, answer.total_tokens);
                 history.push(Message {
                     role: "assistant",
-                    content: answer,
+                    content: answer.text,
                 });
             }
             Err(err) => {
@@ -507,8 +556,8 @@ fn print_banner() {
 }
 
 fn print_help() {
-    println!("\n  {}     сменить провайдера\n  {}         выбрать или создать режим ответа\n  {}  изменить температуру ответов\n  {}          новая сессия\n  {}         выйти\n  {}         эта подсказка\n",
-        style("/provider").yellow(), style("/mode").yellow(), style("/temperature").yellow(), style("/new").yellow(), style("/quit").yellow(), style("/help").yellow());
+    println!("\n  {}     сменить провайдера\n  {}        выбрать модель текущего провайдера\n  {}         выбрать или создать режим ответа\n  {}  изменить температуру ответов\n  {}          новая сессия\n  {}         выйти\n  {}         эта подсказка\n",
+        style("/provider").yellow(), style("/model").yellow(), style("/mode").yellow(), style("/temperature").yellow(), style("/new").yellow(), style("/quit").yellow(), style("/help").yellow());
 }
 
 fn format_temperature(temperature: f64) -> String {
@@ -573,6 +622,112 @@ fn supports_temperature_with_reasoning_none(model: &str) -> bool {
         || model.starts_with("gpt-5.4")
         || model.starts_with("gpt-5.5")
         || model.starts_with("gpt-5.6")
+}
+
+fn normalized_temperature(provider: Provider, model: &str, current: f64) -> f64 {
+    if provider == Provider::Openai && is_original_gpt5_model(model) {
+        1.0
+    } else {
+        current.min(temperature_maximum(provider, model))
+    }
+}
+
+async fn choose_model(
+    client: &Client,
+    config: &Config,
+    provider: Provider,
+) -> Result<Option<String>> {
+    println!("{}", style("Получаю список доступных моделей…").dim());
+    let models = fetch_models(client, config, provider).await?;
+    if models.is_empty() {
+        bail!("{provider} не вернул ни одной совместимой модели");
+    }
+    let current = config.model(provider)?;
+    let default = models
+        .iter()
+        .position(|model| model == current)
+        .unwrap_or(0);
+    let selected = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("Выберите модель {provider}"))
+        .items(&models)
+        .default(default)
+        .interact_opt()?;
+    Ok(selected.map(|index| models[index].clone()))
+}
+
+async fn fetch_models(client: &Client, config: &Config, provider: Provider) -> Result<Vec<String>> {
+    let response = match provider {
+        Provider::Openai => client
+            .get(OPENAI_MODELS_URL)
+            .bearer_auth(
+                config
+                    .key(provider)
+                    .ok_or_else(|| anyhow!("нет ключа OpenAI"))?,
+            )
+            .send()
+            .await
+            .context("не удалось получить модели OpenAI")?,
+        Provider::Claude => client
+            .get(CLAUDE_MODELS_URL)
+            .query(&[("limit", 1000)])
+            .header(
+                "x-api-key",
+                config
+                    .key(provider)
+                    .ok_or_else(|| anyhow!("нет ключа Claude"))?,
+            )
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+            .context("не удалось получить модели Anthropic")?,
+    };
+    let (status, body) = read_response(response).await?;
+    ensure_success(status, &body, &provider.to_string())?;
+    parse_model_ids(&body, provider)
+}
+
+fn parse_model_ids(body: &Value, provider: Provider) -> Result<Vec<String>> {
+    let data = body
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("API вернул список моделей в неизвестном формате"))?;
+    let mut models: Vec<String> = data
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .filter(|id| !id.trim().is_empty())
+        .filter(|id| model_supports_chat(provider, id))
+        .map(str::to_owned)
+        .collect();
+    models.sort_unstable();
+    models.dedup();
+    Ok(models)
+}
+
+fn model_supports_chat(provider: Provider, model: &str) -> bool {
+    if provider == Provider::Claude {
+        return true;
+    }
+
+    let model = model.to_ascii_lowercase();
+    let text_model = model.starts_with("gpt-")
+        || model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
+        || model.starts_with("ft:gpt-");
+    let specialized_model = [
+        "audio",
+        "realtime",
+        "transcribe",
+        "tts",
+        "image",
+        "moderation",
+        "search-preview",
+        "deep-research",
+    ]
+    .iter()
+    .any(|marker| model.contains(marker));
+
+    text_model && !specialized_model
 }
 
 fn mode_name(config: &ModesConfig, active_mode: Option<usize>) -> &str {
@@ -774,7 +929,7 @@ async fn send_request(
     provider: Provider,
     history: &[Message],
     mode: Option<&ResponseMode>,
-) -> Result<String> {
+) -> Result<ApiAnswer> {
     match provider {
         Provider::Openai => send_openai(client, config, history, mode).await,
         Provider::Claude => send_claude(client, config, history, mode).await,
@@ -786,7 +941,7 @@ async fn send_openai(
     config: &Config,
     history: &[Message],
     mode: Option<&ResponseMode>,
-) -> Result<String> {
+) -> Result<ApiAnswer> {
     let mut payload = json!({
         "model": config.model(Provider::Openai)?,
         "input": history,
@@ -813,7 +968,11 @@ async fn send_openai(
         .context("не удалось подключиться к OpenAI")?;
     let (status, body) = read_response(response).await?;
     ensure_success(status, &body, "OpenAI")?;
-    extract_openai_text(&body)
+    let text = extract_openai_text(&body)?;
+    let input_tokens = body.pointer("/usage/input_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let output_tokens = body.pointer("/usage/output_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let total_tokens = body.pointer("/usage/total_tokens").and_then(Value::as_u64).unwrap_or(input_tokens + output_tokens);
+    Ok(ApiAnswer { text, input_tokens, output_tokens, total_tokens })
 }
 
 async fn send_claude(
@@ -821,7 +980,7 @@ async fn send_claude(
     config: &Config,
     history: &[Message],
     mode: Option<&ResponseMode>,
-) -> Result<String> {
+) -> Result<ApiAnswer> {
     let mut payload = json!({
         "model": config.model(Provider::Claude)?,
         "max_tokens": 4096,
@@ -846,7 +1005,10 @@ async fn send_claude(
         .context("не удалось подключиться к Anthropic")?;
     let (status, body) = read_response(response).await?;
     ensure_success(status, &body, "Anthropic")?;
-    extract_claude_text(&body)
+    let text = extract_claude_text(&body)?;
+    let input_tokens = body.pointer("/usage/input_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let output_tokens = body.pointer("/usage/output_tokens").and_then(Value::as_u64).unwrap_or(0);
+    Ok(ApiAnswer { text, input_tokens, output_tokens, total_tokens: input_tokens + output_tokens })
 }
 
 async fn read_response(response: reqwest::Response) -> Result<(StatusCode, Value)> {
@@ -941,12 +1103,16 @@ mod tests {
             ..Config::default()
         };
         config.set_key(Provider::Claude, "secret".into());
+        config
+            .set_model(Provider::Claude, "claude-test".into())
+            .unwrap();
         config.last_mode = Some("Кратко".into());
         config.set_temperature(Provider::Claude, 0.7).unwrap();
         config.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.last_provider, Some(Provider::Claude));
         assert_eq!(loaded.key(Provider::Claude), Some("secret"));
+        assert_eq!(loaded.model(Provider::Claude).unwrap(), "claude-test");
         assert_eq!(loaded.providers.len(), 2);
         assert_eq!(loaded.last_mode.as_deref(), Some("Кратко"));
         assert_eq!(loaded.temperature(Provider::Claude).unwrap(), 0.7);
@@ -1043,9 +1209,67 @@ mod tests {
         assert_eq!(expand_command_hint("/pro"), "/provider");
         assert_eq!(expand_command_hint("обычный запрос"), "обычный запрос");
         assert_eq!(expand_command_hint("/unknown"), "/unknown");
+        assert_eq!(expand_command_hint("/model"), "/model");
         assert_eq!(
             CommandHelper.highlight_hint("vider").as_ref(),
             "\x1b[2mvider\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn parses_sorts_and_deduplicates_model_ids() {
+        let body = json!({
+            "data": [
+                {"id": "model-z"},
+                {"id": "model-a", "display_name": "Model A"},
+                {"id": "model-z"},
+                {"display_name": "No id"},
+                {"id": ""}
+            ]
+        });
+        assert_eq!(
+            parse_model_ids(&body, Provider::Claude).unwrap(),
+            vec!["model-a".to_owned(), "model-z".to_owned()]
+        );
+        assert!(parse_model_ids(&json!({"models": []}), Provider::Openai).is_err());
+    }
+
+    #[test]
+    fn filters_out_openai_models_for_other_apis() {
+        let body = json!({
+            "data": [
+                {"id": "gpt-5.6-luna"},
+                {"id": "o4-mini"},
+                {"id": "ft:gpt-4.1:team:custom:id"},
+                {"id": "gpt-realtime"},
+                {"id": "gpt-4o-mini-transcribe"},
+                {"id": "gpt-image-1"},
+                {"id": "o3-deep-research"},
+                {"id": "text-embedding-3-small"},
+                {"id": "omni-moderation-latest"},
+                {"id": "davinci-002"}
+            ]
+        });
+        assert_eq!(
+            parse_model_ids(&body, Provider::Openai).unwrap(),
+            vec![
+                "ft:gpt-4.1:team:custom:id".to_owned(),
+                "gpt-5.6-luna".to_owned(),
+                "o4-mini".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn normalizes_temperature_for_selected_model() {
+        assert_eq!(normalized_temperature(Provider::Claude, "any", 1.7), 1.0);
+        assert_eq!(
+            normalized_temperature(Provider::Openai, "gpt-5-mini", 0.4),
+            1.0
+        );
+        assert_eq!(
+            normalized_temperature(Provider::Openai, "gpt-4.1", 1.7),
+            1.7
         );
     }
 }
