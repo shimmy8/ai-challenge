@@ -27,6 +27,7 @@ const CLAUDE_KEYS_URL: &str = "https://console.anthropic.com/settings/keys";
 const COMMANDS: &[(&str, &str)] = &[
     ("/provider", "сменить провайдера"),
     ("/mode", "выбрать или создать режим ответа"),
+    ("/temperature", "изменить температуру ответов"),
     ("/new", "начать новую сессию"),
     ("/help", "показать подсказку"),
     ("/quit", "выйти"),
@@ -115,6 +116,8 @@ struct ProviderConfig {
     provider: Provider,
     api_key: Option<String>,
     model: String,
+    #[serde(default = "default_temperature")]
+    temperature: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,10 +132,13 @@ struct LegacyConfig {
 }
 
 fn default_openai_model() -> String {
-    "gpt-5-mini".into()
+    "gpt-5.6-luna".into()
 }
 fn default_claude_model() -> String {
     "claude-sonnet-5".into()
+}
+fn default_temperature() -> f64 {
+    1.0
 }
 
 impl Default for Config {
@@ -145,11 +151,13 @@ impl Default for Config {
                     provider: Provider::Openai,
                     api_key: None,
                     model: default_openai_model(),
+                    temperature: default_temperature(),
                 },
                 ProviderConfig {
                     provider: Provider::Claude,
                     api_key: None,
                     model: default_claude_model(),
+                    temperature: default_temperature(),
                 },
             ],
         }
@@ -178,11 +186,13 @@ impl Config {
                     provider: Provider::Openai,
                     api_key: legacy.openai_api_key,
                     model: legacy.openai_model,
+                    temperature: default_temperature(),
                 },
                 ProviderConfig {
                     provider: Provider::Claude,
                     api_key: legacy.claude_api_key,
                     model: legacy.claude_model,
+                    temperature: default_temperature(),
                 },
             ],
         };
@@ -234,6 +244,22 @@ impl Config {
             .map(|config| config.model.as_str())
             .filter(|model| !model.trim().is_empty())
             .ok_or_else(|| anyhow!("для {provider} не указана модель"))
+    }
+
+    fn temperature(&self, provider: Provider) -> Result<f64> {
+        self.provider(provider)
+            .map(|config| config.temperature)
+            .ok_or_else(|| anyhow!("не найдена конфигурация для {provider}"))
+    }
+
+    fn set_temperature(&mut self, provider: Provider, temperature: f64) -> Result<()> {
+        let config = self
+            .providers
+            .iter_mut()
+            .find(|item| item.provider == provider)
+            .ok_or_else(|| anyhow!("не найдена конфигурация для {provider}"))?;
+        config.temperature = temperature;
+        Ok(())
     }
 
     fn provider(&self, provider: Provider) -> Option<&ProviderConfig> {
@@ -332,11 +358,15 @@ async fn main() -> Result<()> {
         .as_deref()
         .and_then(|name| modes.modes.iter().position(|mode| mode.name == name));
     println!(
-        "{} {}. {} {}. Введите {} для списка команд.\n",
+        "{} {}. {} {}. {} {}. Введите {} для списка команд.\n",
         style("Провайдер:").dim(),
         style(provider).cyan().bold(),
         style("Режим:").dim(),
         style(mode_name(&modes, active_mode)).cyan().bold(),
+        style("Температура:").dim(),
+        style(format_temperature(config.temperature(provider)?))
+            .cyan()
+            .bold(),
         style("/help").yellow()
     );
 
@@ -369,9 +399,13 @@ async fn main() -> Result<()> {
                 remember_provider(&mut config, provider, &config_path)?;
                 history.clear();
                 println!(
-                    "{} {}\n",
+                    "{} {}. {} {}\n",
                     style("Провайдер изменён на").yellow(),
-                    style(provider).cyan().bold()
+                    style(provider).cyan().bold(),
+                    style("Температура:").dim(),
+                    style(format_temperature(config.temperature(provider)?))
+                        .cyan()
+                        .bold()
                 );
                 continue;
             }
@@ -382,6 +416,26 @@ async fn main() -> Result<()> {
                     "{} {}. {}\n",
                     style("Режим изменён на").yellow(),
                     style(mode_name(&modes, active_mode)).cyan().bold(),
+                    style("Начата новая сессия.").dim()
+                );
+                continue;
+            }
+            "/temperature" => {
+                let Some(temperature) = choose_temperature(
+                    provider,
+                    config.model(provider)?,
+                    config.temperature(provider)?,
+                )?
+                else {
+                    continue;
+                };
+                config.set_temperature(provider, temperature)?;
+                config.save(&config_path)?;
+                history.clear();
+                println!(
+                    "{} {}. {}\n",
+                    style("Температура изменена на").yellow(),
+                    style(format_temperature(temperature)).cyan().bold(),
                     style("Начата новая сессия.").dim()
                 );
                 continue;
@@ -453,8 +507,72 @@ fn print_banner() {
 }
 
 fn print_help() {
-    println!("\n  {}  сменить провайдера\n  {}      выбрать или создать режим ответа\n  {}       новая сессия\n  {}      выйти\n  {}      эта подсказка\n",
-        style("/provider").yellow(), style("/mode").yellow(), style("/new").yellow(), style("/quit").yellow(), style("/help").yellow());
+    println!("\n  {}     сменить провайдера\n  {}         выбрать или создать режим ответа\n  {}  изменить температуру ответов\n  {}          новая сессия\n  {}         выйти\n  {}         эта подсказка\n",
+        style("/provider").yellow(), style("/mode").yellow(), style("/temperature").yellow(), style("/new").yellow(), style("/quit").yellow(), style("/help").yellow());
+}
+
+fn format_temperature(temperature: f64) -> String {
+    format!("{temperature:.2}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_owned()
+}
+
+fn choose_temperature(provider: Provider, model: &str, current: f64) -> Result<Option<f64>> {
+    let maximum = temperature_maximum(provider, model);
+    if maximum == 1.0 && provider == Provider::Openai {
+        println!(
+            "{}",
+            style(format!(
+                "Модель {model} поддерживает только температуру по умолчанию 1."
+            ))
+            .yellow()
+        );
+        return Ok(None);
+    }
+    Input::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!(
+            "Температура ответа для {provider} (от 0 до {})",
+            format_temperature(maximum)
+        ))
+        .default(current)
+        .validate_with(move |value: &f64| -> std::result::Result<(), String> {
+            if value.is_finite() && (0.0..=maximum).contains(value) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "температура для {provider} должна быть числом от 0 до {}",
+                    format_temperature(maximum)
+                ))
+            }
+        })
+        .interact_text()
+        .map(Some)
+        .map_err(Into::into)
+}
+
+fn temperature_maximum(provider: Provider, model: &str) -> f64 {
+    match provider {
+        Provider::Claude => 1.0,
+        Provider::Openai if is_original_gpt5_model(model) => 1.0,
+        Provider::Openai => 2.0,
+    }
+}
+
+fn is_original_gpt5_model(model: &str) -> bool {
+    model == "gpt-5"
+        || model.starts_with("gpt-5-")
+        || model.starts_with("gpt-5-mini")
+        || model.starts_with("gpt-5-nano")
+}
+
+fn supports_temperature_with_reasoning_none(model: &str) -> bool {
+    model.starts_with("gpt-5.1")
+        || model.starts_with("gpt-5.2")
+        || model.starts_with("gpt-5.3")
+        || model.starts_with("gpt-5.4")
+        || model.starts_with("gpt-5.5")
+        || model.starts_with("gpt-5.6")
 }
 
 fn mode_name(config: &ModesConfig, active_mode: Option<usize>) -> &str {
@@ -669,7 +787,14 @@ async fn send_openai(
     history: &[Message],
     mode: Option<&ResponseMode>,
 ) -> Result<String> {
-    let mut payload = json!({ "model": config.model(Provider::Openai)?, "input": history });
+    let mut payload = json!({
+        "model": config.model(Provider::Openai)?,
+        "input": history,
+        "temperature": config.temperature(Provider::Openai)?
+    });
+    if supports_temperature_with_reasoning_none(config.model(Provider::Openai)?) {
+        payload["reasoning"] = json!({ "effort": "none" });
+    }
     if let Some(mode) = mode {
         if !mode.instructions.is_empty() {
             payload["instructions"] = json!(mode.instructions);
@@ -700,6 +825,7 @@ async fn send_claude(
     let mut payload = json!({
         "model": config.model(Provider::Claude)?,
         "max_tokens": 4096,
+        "temperature": config.temperature(Provider::Claude)?,
         "messages": history
     });
     if let Some(mode) = mode.filter(|mode| !mode.instructions.is_empty()) {
@@ -816,12 +942,15 @@ mod tests {
         };
         config.set_key(Provider::Claude, "secret".into());
         config.last_mode = Some("Кратко".into());
+        config.set_temperature(Provider::Claude, 0.7).unwrap();
         config.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.last_provider, Some(Provider::Claude));
         assert_eq!(loaded.key(Provider::Claude), Some("secret"));
         assert_eq!(loaded.providers.len(), 2);
         assert_eq!(loaded.last_mode.as_deref(), Some("Кратко"));
+        assert_eq!(loaded.temperature(Provider::Claude).unwrap(), 0.7);
+        assert_eq!(loaded.temperature(Provider::Openai).unwrap(), 1.0);
     }
 
     #[test]
@@ -860,9 +989,43 @@ mod tests {
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.key(Provider::Openai), Some("old-secret"));
         assert_eq!(loaded.model(Provider::Openai).unwrap(), "gpt-test");
+        assert_eq!(
+            loaded.temperature(Provider::Openai).unwrap(),
+            default_temperature()
+        );
         let migrated: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
         assert!(migrated.get("providers").unwrap().is_array());
         assert!(migrated.get("openai_api_key").is_none());
+    }
+
+    #[test]
+    fn loads_current_config_without_temperature() {
+        let config: Config = serde_json::from_value(json!({
+            "last_provider": "openai",
+            "last_mode": null,
+            "providers": [{
+                "provider": "openai",
+                "api_key": null,
+                "model": "gpt-4.1-mini"
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            config.temperature(Provider::Openai).unwrap(),
+            default_temperature()
+        );
+        assert_eq!(format_temperature(0.0), "0");
+        assert_eq!(format_temperature(0.7), "0.7");
+        assert_eq!(format_temperature(1.0), "1");
+        assert_eq!(temperature_maximum(Provider::Openai, "gpt-4o"), 2.0);
+        assert_eq!(temperature_maximum(Provider::Openai, "gpt-5-mini"), 1.0);
+        assert!(supports_temperature_with_reasoning_none("gpt-5.6-luna"));
+        assert!(!supports_temperature_with_reasoning_none("gpt-5-mini"));
+        assert_eq!(
+            temperature_maximum(Provider::Claude, "claude-sonnet-5"),
+            1.0
+        );
     }
 
     #[test]
