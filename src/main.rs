@@ -28,6 +28,163 @@ struct ApiAnswer {
     total_tokens: u64,
 }
 
+#[derive(Debug, Clone)]
+struct AgentSettings {
+    provider: Provider,
+    api_key: String,
+    model: String,
+    temperature: f64,
+    instructions: Option<String>,
+}
+
+impl AgentSettings {
+    fn from_config(
+        config: &Config,
+        provider: Provider,
+        mode: Option<&ResponseMode>,
+    ) -> Result<Self> {
+        Ok(Self {
+            provider,
+            api_key: config
+                .key(provider)
+                .ok_or_else(|| anyhow!("нет ключа {provider}"))?
+                .to_owned(),
+            model: config.model(provider)?.to_owned(),
+            temperature: config.temperature(provider)?,
+            instructions: mode
+                .map(|mode| mode.instructions.trim())
+                .filter(|instructions| !instructions.is_empty())
+                .map(str::to_owned),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgentStatus {
+    Idle,
+    Running,
+    Completed,
+    Failed(String),
+}
+
+struct Agent {
+    id: usize,
+    client: Client,
+    settings: AgentSettings,
+    history: Vec<Message>,
+    status: AgentStatus,
+}
+
+impl Agent {
+    fn new(id: usize, client: Client, settings: AgentSettings) -> Self {
+        Self {
+            id,
+            client,
+            settings,
+            history: Vec::new(),
+            status: AgentStatus::Idle,
+        }
+    }
+
+    async fn ask(&mut self, input: &str) -> Result<ApiAnswer> {
+        self.status = AgentStatus::Running;
+        self.history.push(Message {
+            role: "user",
+            content: input.to_owned(),
+        });
+
+        match send_request(&self.client, &self.settings, &self.history).await {
+            Ok(answer) => {
+                self.history.push(Message {
+                    role: "assistant",
+                    content: answer.text.clone(),
+                });
+                self.status = AgentStatus::Completed;
+                Ok(answer)
+            }
+            Err(error) => {
+                self.history.pop();
+                self.status = AgentStatus::Failed(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.history.clear();
+        self.status = AgentStatus::Idle;
+    }
+
+    fn reconfigure(&mut self, settings: AgentSettings) {
+        self.settings = settings;
+        self.reset();
+    }
+}
+
+struct AgentPool {
+    agents: Vec<Agent>,
+}
+
+struct AgentRunResult {
+    agent_id: usize,
+    elapsed: std::time::Duration,
+    result: Result<ApiAnswer>,
+}
+
+impl AgentPool {
+    fn new(agent_count: usize, client: Client, settings: AgentSettings) -> Self {
+        let agents = (1..=agent_count)
+            .map(|id| Agent::new(id, client.clone(), settings.clone()))
+            .collect();
+        Self { agents }
+    }
+
+    async fn ask_all(&mut self, input: &str) -> Vec<AgentRunResult> {
+        let mut tasks = tokio::task::JoinSet::new();
+        for mut agent in self.agents.drain(..) {
+            let input = input.to_owned();
+            tasks.spawn(async move {
+                let started = Instant::now();
+                let result = agent.ask(&input).await;
+                let run = AgentRunResult {
+                    agent_id: agent.id,
+                    elapsed: started.elapsed(),
+                    result,
+                };
+                (agent, run)
+            });
+        }
+
+        let mut results = Vec::new();
+        while let Some(task) = tasks.join_next().await {
+            match task {
+                Ok((agent, run)) => {
+                    self.agents.push(agent);
+                    results.push(run);
+                }
+                Err(error) => results.push(AgentRunResult {
+                    agent_id: 0,
+                    elapsed: std::time::Duration::ZERO,
+                    result: Err(anyhow!("задача агента аварийно завершилась: {error}")),
+                }),
+            }
+        }
+        self.agents.sort_by_key(|agent| agent.id);
+        results.sort_by_key(|run| run.agent_id);
+        results
+    }
+
+    fn reset(&mut self) {
+        self.agents.iter_mut().for_each(Agent::reset);
+    }
+
+    fn reconfigure(&mut self, settings: AgentSettings) {
+        self.agents
+            .iter_mut()
+            .for_each(|agent| agent.reconfigure(settings.clone()));
+    }
+}
+
 const CONFIG_FILE: &str = ".fox-llm.json";
 const MODES_FILE: &str = "fox-modes.json";
 const OPENAI_KEYS_URL: &str = "https://platform.openai.com/api-keys";
@@ -394,7 +551,12 @@ async fn main() -> Result<()> {
     );
 
     let client = Client::builder().user_agent("fox-llm/0.1.0").build()?;
-    let mut history: Vec<Message> = Vec::new();
+    let initial_mode = active_mode.and_then(|index| modes.modes.get(index));
+    let mut agents = AgentPool::new(
+        1,
+        client.clone(),
+        AgentSettings::from_config(&config, provider, initial_mode)?,
+    );
     let mut editor = Editor::<CommandHelper, DefaultHistory>::new()?;
     editor.set_helper(Some(CommandHelper));
     loop {
@@ -412,7 +574,7 @@ async fn main() -> Result<()> {
         match input.as_str() {
             "/quit" => break,
             "/new" => {
-                history.clear();
+                agents.reset();
                 println!("{}", style("Новая сессия начата.").yellow());
                 continue;
             }
@@ -420,7 +582,11 @@ async fn main() -> Result<()> {
                 provider = choose_provider()?;
                 authorize_if_needed(&mut config, provider, &config_path)?;
                 remember_provider(&mut config, provider, &config_path)?;
-                history.clear();
+                agents.reconfigure(AgentSettings::from_config(
+                    &config,
+                    provider,
+                    active_mode.and_then(|index| modes.modes.get(index)),
+                )?);
                 println!(
                     "{} {}. {} {}. {} {}\n",
                     style("Провайдер изменён на").yellow(),
@@ -444,7 +610,11 @@ async fn main() -> Result<()> {
                     normalized_temperature(provider, &model, config.temperature(provider)?);
                 config.set_temperature(provider, temperature)?;
                 config.save(&config_path)?;
-                history.clear();
+                agents.reconfigure(AgentSettings::from_config(
+                    &config,
+                    provider,
+                    active_mode.and_then(|index| modes.modes.get(index)),
+                )?);
                 println!(
                     "{} {}. {} {}. {}\n",
                     style("Модель изменена на").yellow(),
@@ -457,7 +627,11 @@ async fn main() -> Result<()> {
             }
             "/mode" => {
                 active_mode = choose_mode(&mut config, &mut modes, &config_path, &modes_path)?;
-                history.clear();
+                agents.reconfigure(AgentSettings::from_config(
+                    &config,
+                    provider,
+                    active_mode.and_then(|index| modes.modes.get(index)),
+                )?);
                 println!(
                     "{} {}. {}\n",
                     style("Режим изменён на").yellow(),
@@ -477,7 +651,11 @@ async fn main() -> Result<()> {
                 };
                 config.set_temperature(provider, temperature)?;
                 config.save(&config_path)?;
-                history.clear();
+                agents.reconfigure(AgentSettings::from_config(
+                    &config,
+                    provider,
+                    active_mode.and_then(|index| modes.modes.get(index)),
+                )?);
                 println!(
                     "{} {}. {}\n",
                     style("Температура изменена на").yellow(),
@@ -496,39 +674,38 @@ async fn main() -> Result<()> {
             }
             _ => {}
         }
-        history.push(Message {
-            role: "user",
-            content: input,
-        });
-        print!("{} ", style("Лиса думает…").dim());
+        print!("{} ", style("● Агент 1 · выполняется…").yellow());
         std::io::stdout().flush()?;
-        let mode = active_mode.and_then(|index| modes.modes.get(index));
-        let started = Instant::now();
-        let result = send_request(&client, &config, provider, &history, mode).await;
-        let elapsed = started.elapsed();
-        print!("\r{}\r", " ".repeat(40));
-        match result {
-            Ok(answer) => {
-                println!("{}\n{}\n", style("Лиса").magenta().bold(), answer.text);
-                println!(
-                    "{}\n",
-                    style(format!(
-                        "Метрики: {:.3} с; токены: {} входных + {} выходных = {} всего",
-                        elapsed.as_secs_f64(),
-                        answer.input_tokens,
-                        answer.output_tokens,
-                        answer.total_tokens
-                    ))
-                    .dim()
-                );
-                history.push(Message {
-                    role: "assistant",
-                    content: answer.text,
-                });
-            }
-            Err(err) => {
-                history.pop();
-                eprintln!("{} {err:#}\n", style("Ошибка:").red().bold());
+        let results = agents.ask_all(&input).await;
+        print!("\r{}\r", " ".repeat(60));
+        for run in results {
+            match run.result {
+                Ok(answer) => {
+                    println!(
+                        "{} {}\n{}\n",
+                        style("✓").green().bold(),
+                        style(format!("Агент {}", run.agent_id)).magenta().bold(),
+                        answer.text
+                    );
+                    println!(
+                        "{}\n",
+                        style(format!(
+                            "Метрики: {:.3} с; токены: {} входных + {} выходных = {} всего",
+                            run.elapsed.as_secs_f64(),
+                            answer.input_tokens,
+                            answer.output_tokens,
+                            answer.total_tokens
+                        ))
+                        .dim()
+                    );
+                }
+                Err(err) => {
+                    eprintln!(
+                        "{} {}: {err:#}\n",
+                        style("✗").red().bold(),
+                        style(format!("Агент {}", run.agent_id)).red().bold()
+                    );
+                }
             }
         }
     }
@@ -935,43 +1112,34 @@ fn remember_provider(config: &mut Config, provider: Provider, path: &Path) -> Re
 
 async fn send_request(
     client: &Client,
-    config: &Config,
-    provider: Provider,
+    settings: &AgentSettings,
     history: &[Message],
-    mode: Option<&ResponseMode>,
 ) -> Result<ApiAnswer> {
-    match provider {
-        Provider::Openai => send_openai(client, config, history, mode).await,
-        Provider::Claude => send_claude(client, config, history, mode).await,
+    match settings.provider {
+        Provider::Openai => send_openai(client, settings, history).await,
+        Provider::Claude => send_claude(client, settings, history).await,
     }
 }
 
 async fn send_openai(
     client: &Client,
-    config: &Config,
+    settings: &AgentSettings,
     history: &[Message],
-    mode: Option<&ResponseMode>,
 ) -> Result<ApiAnswer> {
     let mut payload = json!({
-        "model": config.model(Provider::Openai)?,
+        "model": settings.model,
         "input": history,
-        "temperature": config.temperature(Provider::Openai)?
+        "temperature": settings.temperature
     });
-    if supports_temperature_with_reasoning_none(config.model(Provider::Openai)?) {
+    if supports_temperature_with_reasoning_none(&settings.model) {
         payload["reasoning"] = json!({ "effort": "none" });
     }
-    if let Some(mode) = mode {
-        if !mode.instructions.is_empty() {
-            payload["instructions"] = json!(mode.instructions);
-        }
+    if let Some(instructions) = &settings.instructions {
+        payload["instructions"] = json!(instructions);
     }
     let response = client
         .post("https://api.openai.com/v1/responses")
-        .bearer_auth(
-            config
-                .key(Provider::Openai)
-                .ok_or_else(|| anyhow!("нет ключа OpenAI"))?,
-        )
+        .bearer_auth(&settings.api_key)
         .json(&payload)
         .send()
         .await
@@ -979,35 +1147,43 @@ async fn send_openai(
     let (status, body) = read_response(response).await?;
     ensure_success(status, &body, "OpenAI")?;
     let text = extract_openai_text(&body)?;
-    let input_tokens = body.pointer("/usage/input_tokens").and_then(Value::as_u64).unwrap_or(0);
-    let output_tokens = body.pointer("/usage/output_tokens").and_then(Value::as_u64).unwrap_or(0);
-    let total_tokens = body.pointer("/usage/total_tokens").and_then(Value::as_u64).unwrap_or(input_tokens + output_tokens);
-    Ok(ApiAnswer { text, input_tokens, output_tokens, total_tokens })
+    let input_tokens = body
+        .pointer("/usage/input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let output_tokens = body
+        .pointer("/usage/output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let total_tokens = body
+        .pointer("/usage/total_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(input_tokens + output_tokens);
+    Ok(ApiAnswer {
+        text,
+        input_tokens,
+        output_tokens,
+        total_tokens,
+    })
 }
 
 async fn send_claude(
     client: &Client,
-    config: &Config,
+    settings: &AgentSettings,
     history: &[Message],
-    mode: Option<&ResponseMode>,
 ) -> Result<ApiAnswer> {
     let mut payload = json!({
-        "model": config.model(Provider::Claude)?,
+        "model": settings.model,
         "max_tokens": 4096,
-        "temperature": config.temperature(Provider::Claude)?,
+        "temperature": settings.temperature,
         "messages": history
     });
-    if let Some(mode) = mode.filter(|mode| !mode.instructions.is_empty()) {
-        payload["system"] = json!(mode.instructions);
+    if let Some(instructions) = &settings.instructions {
+        payload["system"] = json!(instructions);
     }
     let response = client
         .post("https://api.anthropic.com/v1/messages")
-        .header(
-            "x-api-key",
-            config
-                .key(Provider::Claude)
-                .ok_or_else(|| anyhow!("нет ключа Claude"))?,
-        )
+        .header("x-api-key", &settings.api_key)
         .header("anthropic-version", "2023-06-01")
         .json(&payload)
         .send()
@@ -1016,9 +1192,20 @@ async fn send_claude(
     let (status, body) = read_response(response).await?;
     ensure_success(status, &body, "Anthropic")?;
     let text = extract_claude_text(&body)?;
-    let input_tokens = body.pointer("/usage/input_tokens").and_then(Value::as_u64).unwrap_or(0);
-    let output_tokens = body.pointer("/usage/output_tokens").and_then(Value::as_u64).unwrap_or(0);
-    Ok(ApiAnswer { text, input_tokens, output_tokens, total_tokens: input_tokens + output_tokens })
+    let input_tokens = body
+        .pointer("/usage/input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let output_tokens = body
+        .pointer("/usage/output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    Ok(ApiAnswer {
+        text,
+        input_tokens,
+        output_tokens,
+        total_tokens: input_tokens + output_tokens,
+    })
 }
 
 async fn read_response(response: reqwest::Response) -> Result<(StatusCode, Value)> {
@@ -1281,5 +1468,64 @@ mod tests {
             normalized_temperature(Provider::Openai, "gpt-4.1", 1.7),
             1.7
         );
+    }
+
+    fn test_agent_settings() -> AgentSettings {
+        AgentSettings {
+            provider: Provider::Openai,
+            api_key: "test-key".into(),
+            model: "test-model".into(),
+            temperature: 0.5,
+            instructions: Some("Отвечай кратко".into()),
+        }
+    }
+
+    #[test]
+    fn creates_independent_agents_in_pool() {
+        let client = Client::new();
+        let pool = AgentPool::new(3, client, test_agent_settings());
+
+        assert_eq!(pool.agents.len(), 3);
+        assert_eq!(
+            pool.agents.iter().map(|agent| agent.id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert!(pool.agents.iter().all(|agent| agent.history.is_empty()));
+        assert!(pool
+            .agents
+            .iter()
+            .all(|agent| agent.status == AgentStatus::Idle));
+    }
+
+    #[test]
+    fn reconfiguring_pool_resets_every_agent() {
+        let client = Client::new();
+        let mut pool = AgentPool::new(2, client, test_agent_settings());
+        for agent in &mut pool.agents {
+            agent.history.push(Message {
+                role: "user",
+                content: "старый запрос".into(),
+            });
+            agent.status = AgentStatus::Completed;
+        }
+
+        let mut settings = test_agent_settings();
+        settings.temperature = 0.9;
+        settings.instructions = Some("Новый режим".into());
+        pool.reconfigure(settings);
+
+        assert!(pool.agents.iter().all(|agent| agent.history.is_empty()));
+        assert!(pool
+            .agents
+            .iter()
+            .all(|agent| agent.status == AgentStatus::Idle));
+        assert!(pool
+            .agents
+            .iter()
+            .all(|agent| agent.settings.temperature == 0.9));
+        assert!(pool
+            .agents
+            .iter()
+            .all(|agent| agent.settings.instructions.as_deref() == Some("Новый режим")));
     }
 }
