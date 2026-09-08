@@ -2,6 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use console::{style, Key, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use reqwest::{Client, StatusCode};
+use rusqlite::{params, Connection};
 use rustyline::{
     completion::{Completer, Pair},
     error::ReadlineError,
@@ -72,6 +73,7 @@ struct Agent {
     client: Client,
     settings: AgentSettings,
     history: Vec<Message>,
+    persisted_history: Vec<Message>,
     status: AgentStatus,
 }
 
@@ -82,6 +84,7 @@ impl Agent {
             client,
             settings,
             history: Vec::new(),
+            persisted_history: Vec::new(),
             status: AgentStatus::Idle,
         }
     }
@@ -89,14 +92,22 @@ impl Agent {
     async fn ask(&mut self, input: &str) -> Result<ApiAnswer> {
         self.status = AgentStatus::Running;
         self.history.push(Message {
-            role: "user",
+            role: "user".to_owned(),
+            content: input.to_owned(),
+        });
+        self.persisted_history.push(Message {
+            role: "user".to_owned(),
             content: input.to_owned(),
         });
 
         match send_request(&self.client, &self.settings, &self.history).await {
             Ok(answer) => {
                 self.history.push(Message {
-                    role: "assistant",
+                    role: "assistant".to_owned(),
+                    content: answer.text.clone(),
+                });
+                self.persisted_history.push(Message {
+                    role: "assistant".to_owned(),
                     content: answer.text.clone(),
                 });
                 self.status = AgentStatus::Completed;
@@ -104,6 +115,7 @@ impl Agent {
             }
             Err(error) => {
                 self.history.pop();
+                self.persisted_history.pop();
                 self.status = AgentStatus::Failed(error.to_string());
                 Err(error)
             }
@@ -112,7 +124,22 @@ impl Agent {
 
     fn reset(&mut self) {
         self.history.clear();
+        self.persisted_history.clear();
         self.status = AgentStatus::Idle;
+    }
+
+    fn restore(&mut self, messages: Vec<Message>) {
+        self.reset();
+        if !messages.is_empty() {
+            let toon = encode_messages_toon(&messages);
+            self.history.push(Message {
+                role: "user".to_owned(),
+                content: format!(
+                    "Ниже приведён контекст предыдущей части нашего диалога в формате TOON. Продолжай разговор с учётом этого контекста.\n\n{toon}"
+                ),
+            });
+            self.persisted_history = messages;
+        }
     }
 
     fn reconfigure(&mut self, settings: AgentSettings) {
@@ -183,10 +210,24 @@ impl AgentPool {
             .iter_mut()
             .for_each(|agent| agent.reconfigure(settings.clone()));
     }
+
+    fn restore(&mut self, messages: Vec<Message>) {
+        self.agents
+            .iter_mut()
+            .for_each(|agent| agent.restore(messages.clone()));
+    }
+
+    fn persisted_history(&self) -> &[Message] {
+        self.agents
+            .first()
+            .map(|agent| agent.persisted_history.as_slice())
+            .unwrap_or_default()
+    }
 }
 
 const CONFIG_FILE: &str = ".fox-llm.json";
 const MODES_FILE: &str = "fox-modes.json";
+const SESSIONS_FILE: &str = ".fox-sessions.db";
 const OPENAI_KEYS_URL: &str = "https://platform.openai.com/api-keys";
 const CLAUDE_KEYS_URL: &str = "https://console.anthropic.com/settings/keys";
 const OPENAI_MODELS_URL: &str = "https://api.openai.com/v1/models";
@@ -197,6 +238,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/mode", "выбрать или создать режим ответа"),
     ("/temperature", "изменить температуру ответов"),
     ("/new", "начать новую сессию"),
+    ("/sessions", "открыть сохранённую сессию"),
     ("/help", "показать подсказку"),
     ("/quit", "выйти"),
 ];
@@ -462,10 +504,201 @@ impl ModesConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Message {
-    role: &'static str,
+    role: String,
     content: String,
+}
+
+struct SavedSession {
+    id: i64,
+    title: String,
+    provider: Provider,
+    model: String,
+    mode: Option<String>,
+    temperature: f64,
+    messages: Vec<Message>,
+}
+
+struct SessionStore {
+    connection: Connection,
+}
+
+impl SessionStore {
+    fn open(path: &Path) -> Result<Self> {
+        let connection = Connection::open(path)
+            .with_context(|| format!("не удалось открыть базу сессий {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        }
+        connection.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             CREATE TABLE IF NOT EXISTS sessions (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 title TEXT NOT NULL,
+                 provider TEXT NOT NULL,
+                 model TEXT NOT NULL,
+                 mode TEXT,
+                 temperature REAL NOT NULL,
+                 history_toon TEXT NOT NULL,
+                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );",
+        )?;
+        Ok(Self { connection })
+    }
+
+    fn save(
+        &self,
+        id: Option<i64>,
+        provider: Provider,
+        model: &str,
+        mode: Option<&str>,
+        temperature: f64,
+        messages: &[Message],
+    ) -> Result<i64> {
+        let history = encode_messages_toon(messages);
+        let title = messages
+            .iter()
+            .find(|message| message.role == "user")
+            .map(|message| session_title(&message.content))
+            .unwrap_or_else(|| "Новая сессия".to_owned());
+        let provider = provider_id(provider);
+        if let Some(id) = id {
+            self.connection.execute(
+                "UPDATE sessions SET title = ?1, provider = ?2, model = ?3, mode = ?4,
+                 temperature = ?5, history_toon = ?6, updated_at = CURRENT_TIMESTAMP WHERE id = ?7",
+                params![title, provider, model, mode, temperature, history, id],
+            )?;
+            Ok(id)
+        } else {
+            self.connection.execute(
+                "INSERT INTO sessions (title, provider, model, mode, temperature, history_toon)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![title, provider, model, mode, temperature, history],
+            )?;
+            Ok(self.connection.last_insert_rowid())
+        }
+    }
+
+    fn list(&self) -> Result<Vec<(i64, String, String)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, title, updated_at FROM sessions ORDER BY updated_at DESC, id DESC",
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    fn load(&self, id: i64) -> Result<SavedSession> {
+        let row = self.connection.query_row(
+            "SELECT id, title, provider, model, mode, temperature, history_toon
+             FROM sessions WHERE id = ?1",
+            [id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, f64>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )?;
+        Ok(SavedSession {
+            id: row.0,
+            title: row.1,
+            provider: parse_provider(&row.2)?,
+            model: row.3,
+            mode: row.4,
+            temperature: row.5,
+            messages: decode_messages_toon(&row.6)?,
+        })
+    }
+
+    fn delete(&self, id: i64) -> Result<bool> {
+        Ok(self
+            .connection
+            .execute("DELETE FROM sessions WHERE id = ?1", [id])?
+            > 0)
+    }
+}
+
+fn provider_id(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Openai => "openai",
+        Provider::Claude => "claude",
+    }
+}
+
+fn parse_provider(value: &str) -> Result<Provider> {
+    match value {
+        "openai" => Ok(Provider::Openai),
+        "claude" => Ok(Provider::Claude),
+        _ => bail!("неизвестный провайдер в сохранённой сессии: {value}"),
+    }
+}
+
+fn session_title(content: &str) -> String {
+    let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = compact.chars();
+    let title: String = chars.by_ref().take(48).collect();
+    if chars.next().is_some() {
+        format!("{title}…")
+    } else {
+        title
+    }
+}
+
+fn encode_messages_toon(messages: &[Message]) -> String {
+    let mut output = format!("messages[{}]{{role,content}}:", messages.len());
+    for message in messages {
+        let content = serde_json::to_string(&message.content).expect("String always serializes");
+        output.push_str(&format!("\n  {},{}", message.role, content));
+    }
+    output
+}
+
+fn decode_messages_toon(input: &str) -> Result<Vec<Message>> {
+    let mut lines = input.lines();
+    let header = lines.next().context("пустая история TOON")?;
+    if !header.starts_with("messages[") || !header.ends_with("{role,content}:") {
+        bail!("неверный заголовок истории TOON");
+    }
+    let declared_count = header
+        .strip_prefix("messages[")
+        .and_then(|value| value.strip_suffix("]{role,content}:"))
+        .context("неверный заголовок истории TOON")?
+        .parse::<usize>()
+        .context("неверное число сообщений в истории TOON")?;
+    let messages = lines
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let (role, content) = line
+                .trim_start()
+                .split_once(',')
+                .context("повреждена строка истории TOON")?;
+            if role != "user" && role != "assistant" {
+                bail!("неизвестная роль в истории TOON: {role}");
+            }
+            Ok(Message {
+                role: role.to_owned(),
+                content: serde_json::from_str(content)
+                    .context("повреждено содержимое сообщения TOON")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if messages.len() != declared_count {
+        bail!(
+            "число сообщений в истории TOON не совпадает: ожидалось {declared_count}, найдено {}",
+            messages.len()
+        );
+    }
+    Ok(messages)
 }
 
 struct CommandHelper;
@@ -525,6 +758,8 @@ async fn main() -> Result<()> {
     let mut config = Config::load(&config_path)?;
     let modes_path = modes_path()?;
     let mut modes = ModesConfig::load(&modes_path)?;
+    let sessions = SessionStore::open(&sessions_path()?)?;
+    let mut active_session_id = None;
     let mut provider = match config.last_provider {
         Some(saved) => saved,
         None => choose_provider()?,
@@ -575,7 +810,95 @@ async fn main() -> Result<()> {
             "/quit" => break,
             "/new" => {
                 agents.reset();
+                active_session_id = None;
                 println!("{}", style("Новая сессия начата.").yellow());
+                continue;
+            }
+            "/sessions" => {
+                let saved = sessions.list()?;
+                if saved.is_empty() {
+                    println!("{}", style("Сохранённых сессий пока нет.").dim());
+                    continue;
+                }
+                let choices = saved
+                    .iter()
+                    .map(|(_, title, updated_at)| format!("{title} · {updated_at} UTC"))
+                    .collect::<Vec<_>>();
+                let selected = Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Выберите сессию для продолжения")
+                    .items(&choices)
+                    .default(0)
+                    .interact_opt()?;
+                let Some(selected) = selected else {
+                    println!("{}", style("Выбор сессии отменён.").dim());
+                    continue;
+                };
+                let session_id = saved[selected].0;
+                let session_title = &saved[selected].1;
+                let actions = ["Продолжить", "Удалить"];
+                let action = Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Выберите действие")
+                    .items(&actions)
+                    .default(0)
+                    .interact_opt()?;
+                let Some(action) = action else {
+                    println!("{}", style("Действие отменено.").dim());
+                    continue;
+                };
+                if action == 1 {
+                    let confirmed = Confirm::with_theme(&ColorfulTheme::default())
+                        .with_prompt(format!("Удалить сессию «{session_title}»?"))
+                        .default(false)
+                        .interact()?;
+                    if !confirmed {
+                        println!("{}", style("Удаление отменено.").dim());
+                        continue;
+                    }
+                    if sessions.delete(session_id)? {
+                        if active_session_id == Some(session_id) {
+                            agents.reset();
+                            active_session_id = None;
+                            println!(
+                                "{} {}",
+                                style("Сессия удалена.").yellow(),
+                                style("Начата новая сессия.").dim()
+                            );
+                        } else {
+                            println!("{}", style("Сессия удалена.").yellow());
+                        }
+                    } else {
+                        println!("{}", style("Сессия уже была удалена.").dim());
+                    }
+                    continue;
+                }
+                let session = sessions.load(session_id)?;
+                provider = session.provider;
+                authorize_if_needed(&mut config, provider, &config_path)?;
+                config.last_provider = Some(provider);
+                config.set_model(provider, session.model.clone())?;
+                config.set_temperature(provider, session.temperature)?;
+                active_mode = session
+                    .mode
+                    .as_deref()
+                    .and_then(|name| modes.modes.iter().position(|mode| mode.name == name));
+                config.last_mode = active_mode.map(|index| modes.modes[index].name.clone());
+                config.save(&config_path)?;
+                agents.reconfigure(AgentSettings::from_config(
+                    &config,
+                    provider,
+                    active_mode.and_then(|index| modes.modes.get(index)),
+                )?);
+                agents.restore(session.messages);
+                active_session_id = Some(session.id);
+                println!(
+                    "{} {}. {} {}. {} {}.\n",
+                    style("Сессия продолжена:").yellow(),
+                    style(session.title).cyan().bold(),
+                    style("Провайдер:").dim(),
+                    style(provider).cyan(),
+                    style("Модель:").dim(),
+                    style(session.model).cyan()
+                );
                 continue;
             }
             "/provider" => {
@@ -587,6 +910,7 @@ async fn main() -> Result<()> {
                     provider,
                     active_mode.and_then(|index| modes.modes.get(index)),
                 )?);
+                active_session_id = None;
                 println!(
                     "{} {}. {} {}. {} {}\n",
                     style("Провайдер изменён на").yellow(),
@@ -615,6 +939,7 @@ async fn main() -> Result<()> {
                     provider,
                     active_mode.and_then(|index| modes.modes.get(index)),
                 )?);
+                active_session_id = None;
                 println!(
                     "{} {}. {} {}. {}\n",
                     style("Модель изменена на").yellow(),
@@ -632,6 +957,7 @@ async fn main() -> Result<()> {
                     provider,
                     active_mode.and_then(|index| modes.modes.get(index)),
                 )?);
+                active_session_id = None;
                 println!(
                     "{} {}. {}\n",
                     style("Режим изменён на").yellow(),
@@ -656,6 +982,7 @@ async fn main() -> Result<()> {
                     provider,
                     active_mode.and_then(|index| modes.modes.get(index)),
                 )?);
+                active_session_id = None;
                 println!(
                     "{} {}. {}\n",
                     style("Температура изменена на").yellow(),
@@ -677,6 +1004,7 @@ async fn main() -> Result<()> {
         print!("{} ", style("● Агент 1 · выполняется…").yellow());
         std::io::stdout().flush()?;
         let results = agents.ask_all(&input).await;
+        let answered = results.iter().any(|run| run.result.is_ok());
         print!("\r{}\r", " ".repeat(60));
         for run in results {
             match run.result {
@@ -708,6 +1036,16 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        if answered {
+            active_session_id = Some(sessions.save(
+                active_session_id,
+                provider,
+                config.model(provider)?,
+                active_mode.and_then(|index| modes.modes.get(index).map(|mode| mode.name.as_str())),
+                config.temperature(provider)?,
+                agents.persisted_history(),
+            )?);
+        }
     }
     println!("{}", style("До встречи! 🦊").magenta());
     Ok(())
@@ -736,6 +1074,12 @@ fn modes_path() -> Result<PathBuf> {
         .join(MODES_FILE))
 }
 
+fn sessions_path() -> Result<PathBuf> {
+    Ok(std::env::current_dir()
+        .context("не удалось определить текущую директорию")?
+        .join(SESSIONS_FILE))
+}
+
 fn print_banner() {
     let term = Term::stdout();
     let _ = term.write_line(&style(FOX).color256(208).bold().to_string());
@@ -743,8 +1087,8 @@ fn print_banner() {
 }
 
 fn print_help() {
-    println!("\n  {}     сменить провайдера\n  {}        выбрать модель текущего провайдера\n  {}         выбрать или создать режим ответа\n  {}  изменить температуру ответов\n  {}          новая сессия\n  {}         выйти\n  {}         эта подсказка\n",
-        style("/provider").yellow(), style("/model").yellow(), style("/mode").yellow(), style("/temperature").yellow(), style("/new").yellow(), style("/quit").yellow(), style("/help").yellow());
+    println!("\n  {}     сменить провайдера\n  {}        выбрать модель текущего провайдера\n  {}         выбрать или создать режим ответа\n  {}  изменить температуру ответов\n  {}          новая сессия\n  {}     открыть сохранённую сессию\n  {}         выйти\n  {}         эта подсказка\n",
+        style("/provider").yellow(), style("/model").yellow(), style("/mode").yellow(), style("/temperature").yellow(), style("/new").yellow(), style("/sessions").yellow(), style("/quit").yellow(), style("/help").yellow());
 }
 
 fn format_temperature(temperature: f64) -> String {
@@ -1503,7 +1847,7 @@ mod tests {
         let mut pool = AgentPool::new(2, client, test_agent_settings());
         for agent in &mut pool.agents {
             agent.history.push(Message {
-                role: "user",
+                role: "user".to_owned(),
                 content: "старый запрос".into(),
             });
             agent.status = AgentStatus::Completed;
@@ -1527,5 +1871,50 @@ mod tests {
             .agents
             .iter()
             .all(|agent| agent.settings.instructions.as_deref() == Some("Новый режим")));
+    }
+
+    #[test]
+    fn toon_history_round_trips_multiline_messages() {
+        let messages = vec![
+            Message {
+                role: "user".into(),
+                content: "Привет, лиса!\nКак дела?".into(),
+            },
+            Message {
+                role: "assistant".into(),
+                content: "Хорошо: \"отлично\"".into(),
+            },
+        ];
+        let encoded = encode_messages_toon(&messages);
+        assert!(encoded.starts_with("messages[2]{role,content}:"));
+        assert_eq!(decode_messages_toon(&encoded).unwrap(), messages);
+    }
+
+    #[test]
+    fn sqlite_store_saves_and_loads_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("sessions.db")).unwrap();
+        let messages = vec![Message {
+            role: "user".into(),
+            content: "Обсудим сохранение контекста".into(),
+        }];
+        let id = store
+            .save(
+                None,
+                Provider::Openai,
+                "test-model",
+                Some("Кратко"),
+                0.5,
+                &messages,
+            )
+            .unwrap();
+        let loaded = store.load(id).unwrap();
+        assert_eq!(loaded.messages, messages);
+        assert_eq!(loaded.model, "test-model");
+        assert_eq!(loaded.mode.as_deref(), Some("Кратко"));
+        assert_eq!(store.list().unwrap().len(), 1);
+        assert!(store.delete(id).unwrap());
+        assert!(store.list().unwrap().is_empty());
+        assert!(!store.delete(id).unwrap());
     }
 }
