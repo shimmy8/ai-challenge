@@ -1,3 +1,6 @@
 /target/
 .fox-llm.json
 *.fox-llm.json
+.fox-sessions.db
+.fox-sessions.db-shm
+.fox-sessions.db-wal
