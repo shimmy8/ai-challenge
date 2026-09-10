@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use console::{style, Key, Term};
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect, Input, Select};
 use reqwest::{Client, StatusCode};
 use rusqlite::{params, Connection};
 use rustyline::{
@@ -19,14 +19,28 @@ use std::{
     fmt, fs,
     io::Write,
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 struct ApiAnswer {
     text: String,
     input_tokens: u64,
     output_tokens: u64,
-    total_tokens: u64,
+    session_input_tokens: u64,
+    session_output_tokens: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct MetricsLogEntry<'a> {
+    timestamp_unix_ms: u128,
+    agent_id: usize,
+    provider: Provider,
+    model: &'a str,
+    elapsed_ms: u128,
+    request_input_tokens: u64,
+    request_output_tokens: u64,
+    session_input_tokens: u64,
+    session_output_tokens: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +88,8 @@ struct Agent {
     settings: AgentSettings,
     history: Vec<Message>,
     persisted_history: Vec<Message>,
+    session_input_tokens: u64,
+    session_output_tokens: u64,
     status: AgentStatus,
 }
 
@@ -85,6 +101,8 @@ impl Agent {
             settings,
             history: Vec::new(),
             persisted_history: Vec::new(),
+            session_input_tokens: 0,
+            session_output_tokens: 0,
             status: AgentStatus::Idle,
         }
     }
@@ -101,7 +119,11 @@ impl Agent {
         });
 
         match send_request(&self.client, &self.settings, &self.history).await {
-            Ok(answer) => {
+            Ok(mut answer) => {
+                self.session_input_tokens += answer.input_tokens;
+                self.session_output_tokens += answer.output_tokens;
+                answer.session_input_tokens = self.session_input_tokens;
+                answer.session_output_tokens = self.session_output_tokens;
                 self.history.push(Message {
                     role: "assistant".to_owned(),
                     content: answer.text.clone(),
@@ -125,6 +147,8 @@ impl Agent {
     fn reset(&mut self) {
         self.history.clear();
         self.persisted_history.clear();
+        self.session_input_tokens = 0;
+        self.session_output_tokens = 0;
         self.status = AgentStatus::Idle;
     }
 
@@ -228,6 +252,7 @@ impl AgentPool {
 const CONFIG_FILE: &str = ".fox-llm.json";
 const MODES_FILE: &str = "fox-modes.json";
 const SESSIONS_FILE: &str = ".fox-sessions.db";
+const METRICS_LOG_FILE: &str = "fox-metrics.log";
 const OPENAI_KEYS_URL: &str = "https://platform.openai.com/api-keys";
 const CLAUDE_KEYS_URL: &str = "https://console.anthropic.com/settings/keys";
 const OPENAI_MODELS_URL: &str = "https://api.openai.com/v1/models";
@@ -753,12 +778,14 @@ impl Hinter for CommandHelper {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let dump_metrics = parse_dump_metrics_flag(std::env::args().skip(1))?;
     print_banner();
     let config_path = config_path()?;
     let mut config = Config::load(&config_path)?;
     let modes_path = modes_path()?;
     let mut modes = ModesConfig::load(&modes_path)?;
     let sessions = SessionStore::open(&sessions_path()?)?;
+    let metrics_log_path = dump_metrics.then(metrics_path).transpose()?;
     let mut active_session_id = None;
     let mut provider = match config.last_provider {
         Some(saved) => saved,
@@ -770,20 +797,14 @@ async fn main() -> Result<()> {
         .last_mode
         .as_deref()
         .and_then(|name| modes.modes.iter().position(|mode| mode.name == name));
-    println!(
-        "{} {}. {} {}. {} {}. {} {}. Введите {} для списка команд.\n",
-        style("Провайдер:").dim(),
-        style(provider).cyan().bold(),
-        style("Модель:").dim(),
-        style(config.model(provider)?).cyan().bold(),
-        style("Режим:").dim(),
-        style(mode_name(&modes, active_mode)).cyan().bold(),
-        style("Температура:").dim(),
-        style(format_temperature(config.temperature(provider)?))
-            .cyan()
-            .bold(),
-        style("/help").yellow()
-    );
+    println!("Введите {} для списка команд.\n", style("/help").yellow());
+    if let Some(path) = &metrics_log_path {
+        println!(
+            "{} {}\n",
+            style("Лог метрик:").dim(),
+            style(path.display()).cyan()
+        );
+    }
 
     let client = Client::builder().user_agent("fox-llm/0.1.0").build()?;
     let initial_mode = active_mode.and_then(|index| modes.modes.get(index));
@@ -795,8 +816,16 @@ async fn main() -> Result<()> {
     let mut editor = Editor::<CommandHelper, DefaultHistory>::new()?;
     editor.set_helper(Some(CommandHelper));
     loop {
+        show_status_bar(
+            provider,
+            config.model(provider)?,
+            mode_name(&modes, active_mode),
+            config.temperature(provider)?,
+        )?;
         let prompt = format!("{} ", style("Вы ›").green().bold());
-        let input = match editor.readline(&prompt) {
+        let readline_result = editor.readline(&prompt);
+        clear_status_bar()?;
+        let input = match readline_result {
             Ok(value) => value.trim().to_owned(),
             Err(ReadlineError::Interrupted | ReadlineError::Eof) => break,
             Err(err) => return Err(err.into()),
@@ -1009,6 +1038,25 @@ async fn main() -> Result<()> {
         for run in results {
             match run.result {
                 Ok(answer) => {
+                    if let Some(path) = &metrics_log_path {
+                        let entry = MetricsLogEntry {
+                            timestamp_unix_ms: SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis(),
+                            agent_id: run.agent_id,
+                            provider,
+                            model: config.model(provider)?,
+                            elapsed_ms: run.elapsed.as_millis(),
+                            request_input_tokens: answer.input_tokens,
+                            request_output_tokens: answer.output_tokens,
+                            session_input_tokens: answer.session_input_tokens,
+                            session_output_tokens: answer.session_output_tokens,
+                        };
+                        if let Err(error) = append_metrics_log(path, &entry) {
+                            eprintln!("{} {error:#}", style("Не удалось записать метрики:").red());
+                        }
+                    }
                     println!(
                         "{} {}\n{}\n",
                         style("✓").green().bold(),
@@ -1018,11 +1066,12 @@ async fn main() -> Result<()> {
                     println!(
                         "{}\n",
                         style(format!(
-                            "Метрики: {:.3} с; токены: {} входных + {} выходных = {} всего",
+                            "Метрики: {:.3} с; токены — запрос: {} входных, {} выходных; сессия: {} входных, {} выходных",
                             run.elapsed.as_secs_f64(),
                             answer.input_tokens,
                             answer.output_tokens,
-                            answer.total_tokens
+                            answer.session_input_tokens,
+                            answer.session_output_tokens
                         ))
                         .dim()
                     );
@@ -1080,10 +1129,66 @@ fn sessions_path() -> Result<PathBuf> {
         .join(SESSIONS_FILE))
 }
 
+fn metrics_path() -> Result<PathBuf> {
+    Ok(std::env::current_dir()
+        .context("не удалось определить текущую директорию")?
+        .join(METRICS_LOG_FILE))
+}
+
+fn parse_dump_metrics_flag(args: impl IntoIterator<Item = String>) -> Result<bool> {
+    let mut dump_metrics = false;
+    for argument in args {
+        match argument.as_str() {
+            "--dump-metrics" => dump_metrics = true,
+            _ => bail!("неизвестный аргумент: {argument}. Доступен флаг --dump-metrics"),
+        }
+    }
+    Ok(dump_metrics)
+}
+
+fn append_metrics_log(path: &Path, entry: &MetricsLogEntry<'_>) -> Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("не удалось открыть {}", path.display()))?;
+    serde_json::to_writer(&mut file, entry)?;
+    writeln!(file)?;
+    Ok(())
+}
+
 fn print_banner() {
     let term = Term::stdout();
     let _ = term.write_line(&style(FOX).color256(208).bold().to_string());
     println!("{}\n", style("FOX LLM — спроси у лисы").magenta().bold());
+}
+
+fn show_status_bar(provider: Provider, model: &str, mode: &str, temperature: f64) -> Result<()> {
+    let status = format!(
+        "{} {}  {} {}  {} {}  {} {}",
+        style("Провайдер:").dim(),
+        style(provider).cyan().bold(),
+        style("Модель:").dim(),
+        style(model).cyan().bold(),
+        style("Режим:").dim(),
+        style(mode).cyan().bold(),
+        style("Температура:").dim(),
+        style(format_temperature(temperature)).cyan().bold(),
+    );
+    // Draw the status one row below the input, then return the cursor to the
+    // input row. It is erased as soon as readline finishes, so completed
+    // prompts do not leave repeated status lines in terminal scrollback.
+    print!("\n\x1b[2K{status}\x1b[1A\r");
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
+fn clear_status_bar() -> Result<()> {
+    // Enter leaves the cursor on the status row. Clear it before printing the
+    // command result and reuse that row for normal output.
+    print!("\r\x1b[2K");
+    std::io::stdout().flush()?;
+    Ok(())
 }
 
 fn print_help() {
@@ -1178,8 +1283,10 @@ async fn choose_model(
         .iter()
         .position(|model| model == current)
         .unwrap_or(0);
-    let selected = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("Выберите модель {provider}"))
+    let selected = FuzzySelect::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!(
+            "Найдите модель {provider} (начните вводить название)"
+        ))
         .items(&models)
         .default(default)
         .interact_opt()?;
@@ -1226,7 +1333,7 @@ fn parse_model_ids(body: &Value, provider: Provider) -> Result<Vec<String>> {
         .iter()
         .filter_map(|item| item.get("id").and_then(Value::as_str))
         .filter(|id| !id.trim().is_empty())
-        .filter(|id| model_supports_chat(provider, id))
+        .filter(|id| model_supports_responses_api(provider, id))
         .map(str::to_owned)
         .collect();
     models.sort_unstable();
@@ -1234,7 +1341,7 @@ fn parse_model_ids(body: &Value, provider: Provider) -> Result<Vec<String>> {
     Ok(models)
 }
 
-fn model_supports_chat(provider: Provider, model: &str) -> bool {
+fn model_supports_responses_api(provider: Provider, model: &str) -> bool {
     if provider == Provider::Claude {
         return true;
     }
@@ -1257,8 +1364,12 @@ fn model_supports_chat(provider: Provider, model: &str) -> bool {
     ]
     .iter()
     .any(|marker| model.contains(marker));
+    // The models endpoint lists every model available to the account but does
+    // not expose endpoint capabilities. Instruct models are documented as
+    // legacy Completions-only and cannot be sent to /v1/responses.
+    let legacy_completions_model = model.starts_with("gpt-3.5-turbo-instruct");
 
-    text_model && !specialized_model
+    text_model && !specialized_model && !legacy_completions_model
 }
 
 fn mode_name(config: &ModesConfig, active_mode: Option<usize>) -> &str {
@@ -1499,15 +1610,12 @@ async fn send_openai(
         .pointer("/usage/output_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let total_tokens = body
-        .pointer("/usage/total_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(input_tokens + output_tokens);
     Ok(ApiAnswer {
         text,
         input_tokens,
         output_tokens,
-        total_tokens,
+        session_input_tokens: 0,
+        session_output_tokens: 0,
     })
 }
 
@@ -1548,7 +1656,8 @@ async fn send_claude(
         text,
         input_tokens,
         output_tokens,
-        total_tokens: input_tokens + output_tokens,
+        session_input_tokens: 0,
+        session_output_tokens: 0,
     })
 }
 
@@ -1633,6 +1742,39 @@ mod tests {
     fn parses_claude_response() {
         let body = json!({"content": [{"type": "text", "text": "Привет!"}]});
         assert_eq!(extract_claude_text(&body).unwrap(), "Привет!");
+    }
+
+    #[test]
+    fn parses_dump_metrics_flag() {
+        assert!(!parse_dump_metrics_flag(Vec::new()).unwrap());
+        assert!(parse_dump_metrics_flag(vec!["--dump-metrics".into()]).unwrap());
+        assert!(parse_dump_metrics_flag(vec!["--unknown".into()]).is_err());
+    }
+
+    #[test]
+    fn appends_json_metrics_log() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("metrics.log");
+        let entry = MetricsLogEntry {
+            timestamp_unix_ms: 123,
+            agent_id: 1,
+            provider: Provider::Openai,
+            model: "gpt-test",
+            elapsed_ms: 456,
+            request_input_tokens: 10,
+            request_output_tokens: 20,
+            session_input_tokens: 30,
+            session_output_tokens: 40,
+        };
+
+        append_metrics_log(&path, &entry).unwrap();
+        append_metrics_log(&path, &entry).unwrap();
+
+        let lines = fs::read_to_string(path).unwrap();
+        assert_eq!(lines.lines().count(), 2);
+        let value: Value = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
+        assert_eq!(value["request_input_tokens"], 10);
+        assert_eq!(value["session_output_tokens"], 40);
     }
 
     #[test]
@@ -1782,6 +1924,8 @@ mod tests {
                 {"id": "gpt-5.6-luna"},
                 {"id": "o4-mini"},
                 {"id": "ft:gpt-4.1:team:custom:id"},
+                {"id": "gpt-3.5-turbo-instruct"},
+                {"id": "gpt-3.5-turbo-instruct-0914"},
                 {"id": "gpt-realtime"},
                 {"id": "gpt-4o-mini-transcribe"},
                 {"id": "gpt-image-1"},

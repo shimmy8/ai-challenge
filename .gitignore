@@ -4,3 +4,4 @@
 .fox-sessions.db
 .fox-sessions.db-shm
 .fox-sessions.db-wal
+fox-metrics.log
