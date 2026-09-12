@@ -1,0 +1,58 @@
+{
+  "A": {
+    "count": 29,
+    "settings": [
+      [
+        "openai",
+        "gpt-5.6-luna"
+      ]
+    ],
+    "input": 38224,
+    "output": 2302,
+    "total": 40526,
+    "last_input": 2824,
+    "mean_input": 1318.0689655172414,
+    "median_input": 1316,
+    "mean_ms": 5346.896551724138,
+    "main_input": 38224,
+    "main_output": 2302,
+    "summary_input": 0,
+    "summary_output": 0
+  },
+  "B": {
+    "count": 29,
+    "settings": [
+      [
+        "openai",
+        "gpt-5.6-luna"
+      ]
+    ],
+    "input": 33344,
+    "output": 12017,
+    "total": 45361,
+    "last_input": 980,
+    "mean_input": 669.1379310344828,
+    "median_input": 719,
+    "mean_ms": 8039.620689655172,
+    "main_input": 19405,
+    "main_output": 2760,
+    "summary_input": 13939,
+    "summary_output": 9257
+  },
+  "difference_input": {
+    "absolute": 4880,
+    "percent": 12.766848053578903
+  },
+  "difference_output": {
+    "absolute": -9715,
+    "percent": -422.02432667245876
+  },
+  "difference_total": {
+    "absolute": -4835,
+    "percent": -11.93061244633075
+  },
+  "difference_last_input": {
+    "absolute": 1844,
+    "percent": 65.29745042492918
+  }
+}
