@@ -17,6 +17,11 @@ use std::{
 #[cfg(test)]
 mod suite {
     use super::*;
+    use crate::app::{
+        activate_memory_context, advance_task_if_confirmed, create_profile_if_confirmed,
+        create_task_if_confirmed, handle_profile_command, handle_task_command,
+        update_task_todo_if_confirmed, ProfileCommandOutcome, TaskCommandOutcome,
+    };
 
     #[test]
     pub(crate) fn parses_openai_response() {
@@ -175,11 +180,14 @@ mod suite {
         let helper = CommandHelper::new(enabled.clone());
         let (start, candidates) = helper.complete("/pro", 4, &context).unwrap();
         assert_eq!(start, 0);
-        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].replacement, "/provider");
-        assert_eq!(helper.hint("/pro", 4, &context).as_deref(), Some("vider"));
+        assert_eq!(candidates[1].replacement, "/profile");
+        assert_eq!(helper.hint("/pro", 4, &context), None);
+        assert_eq!(helper.hint("/prov", 5, &context).as_deref(), Some("ider"));
         assert!(helper.complete("/bra", 4, &context).unwrap().1.is_empty());
-        assert_eq!(expand_command_hint("/pro", false), "/provider");
+        assert_eq!(expand_command_hint("/pro", false), "/pro");
+        assert_eq!(expand_command_hint("/prov", false), "/provider");
         assert_eq!(
             expand_command_hint("обычный запрос", false),
             "обычный запрос"
@@ -187,6 +195,8 @@ mod suite {
         assert_eq!(expand_command_hint("/unknown", false), "/unknown");
         assert_eq!(expand_command_hint("/model", false), "/model");
         assert_eq!(expand_command_hint("/mode", false), "/mode");
+        assert_eq!(expand_command_hint("/mem", false), "/memory");
+        assert_eq!(expand_command_hint("/tas", false), "/task");
         assert_eq!(helper.hint("/mode", 5, &context), None);
         enabled.store(true, Ordering::Relaxed);
         assert_eq!(
@@ -566,6 +576,8 @@ mod suite {
                     checkpoint: agent.checkpoint.as_ref(),
                     active_branch: &agent.active_branch,
                     branch_pending: agent.branch_pending,
+                    profile_id: None,
+                    task_id: None,
                 },
             )
             .unwrap();
@@ -627,6 +639,8 @@ mod suite {
                     checkpoint: None,
                     active_branch: "main",
                     branch_pending: false,
+                    profile_id: None,
+                    task_id: None,
                 },
             )
             .unwrap();
@@ -670,6 +684,8 @@ mod suite {
                     checkpoint: None,
                     active_branch: "main",
                     branch_pending: false,
+                    profile_id: None,
+                    task_id: None,
                 },
             )
             .unwrap();
@@ -742,6 +758,8 @@ mod suite {
                     checkpoint: None,
                     active_branch: "main",
                     branch_pending: false,
+                    profile_id: None,
+                    task_id: None,
                 },
             )
             .unwrap();
@@ -759,5 +777,402 @@ mod suite {
         assert!(store.delete(id).unwrap());
         assert!(store.list().unwrap().is_empty());
         assert!(!store.delete(id).unwrap());
+    }
+
+    #[test]
+    fn task_phases_are_strict_and_sequential() {
+        let phases = [
+            TaskPhase::Planning,
+            TaskPhase::Execution,
+            TaskPhase::Validation,
+            TaskPhase::Done,
+        ];
+        assert_eq!(TaskPhase::Planning.next(), Some(TaskPhase::Execution));
+        assert_eq!(TaskPhase::Execution.next(), Some(TaskPhase::Validation));
+        assert_eq!(TaskPhase::Validation.next(), Some(TaskPhase::Done));
+        assert_eq!(TaskPhase::Done.next(), None);
+        for phase in phases {
+            assert_eq!(phase.to_string().parse::<TaskPhase>().unwrap(), phase);
+            assert!(!phase.instructions().is_empty());
+        }
+        assert!(TaskPhase::Planning
+            .instructions()
+            .contains("не переходи к выполнению"));
+        assert!(TaskPhase::Execution
+            .instructions()
+            .contains("согласованный TODO"));
+        assert!(TaskPhase::Validation
+            .instructions()
+            .contains("проверяй результат"));
+        assert!(TaskPhase::Done
+            .instructions()
+            .contains("Следующего этапа нет"));
+        assert!("review".parse::<TaskPhase>().is_err());
+    }
+
+    #[test]
+    fn memory_text_validation_is_trimmed_unicode_aware_and_bounded() {
+        assert_eq!(
+            validate_memory_text("  профиль  ", "поле", 8).unwrap(),
+            "профиль"
+        );
+        assert!(validate_memory_text("   ", "поле", 10).is_err());
+        assert!(validate_memory_text(&"я".repeat(11), "поле", 10).is_err());
+        assert!(validate_profile("имя", " ").is_err());
+        assert!(validate_task(" ", "TODO").is_err());
+    }
+
+    #[test]
+    fn profiles_tasks_and_session_links_survive_database_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("memory.db");
+        let store = SessionStore::open(&path).unwrap();
+        let profile = store
+            .create_profile("Rust", "Отвечай как Rust-разработчик")
+            .unwrap();
+        assert!(store.create_profile("Rust", "Дублирующее имя").is_err());
+        let mut task = store
+            .create_task("Memory layers", "Спроектировать и реализовать")
+            .unwrap();
+        assert_eq!(task.phase, TaskPhase::Planning);
+        task = store
+            .update_task_todo(task.id, "Реализовать и проверить")
+            .unwrap();
+        assert_eq!(task.todo, "Реализовать и проверить");
+        for expected in [TaskPhase::Execution, TaskPhase::Validation, TaskPhase::Done] {
+            task = store.advance_task(task.id).unwrap();
+            assert_eq!(task.phase, expected);
+        }
+        assert!(store.advance_task(task.id).is_err());
+
+        let messages = vec![Message {
+            role: "user".into(),
+            content: "Продолжим задачу".into(),
+        }];
+        let session_id = store
+            .save(
+                None,
+                SessionSnapshot {
+                    provider: Provider::Openai,
+                    model: "test-model",
+                    mode: None,
+                    temperature: 1.0,
+                    messages: &messages,
+                    summary: "summary",
+                    facts: &BTreeMap::from([("fact".to_owned(), "value".to_owned())]),
+                    summarized_count: 0,
+                    compression_strategy: CompressionStrategy::Branching,
+                    context_messages: 10,
+                    branches: &HashMap::new(),
+                    checkpoint: None,
+                    active_branch: "main",
+                    branch_pending: false,
+                    profile_id: Some(profile.id),
+                    task_id: Some(task.id),
+                },
+            )
+            .unwrap();
+        let second_messages = vec![Message {
+            role: "user".into(),
+            content: "Новая краткосрочная память той же задачи".into(),
+        }];
+        let second_session_id = store
+            .save(
+                None,
+                SessionSnapshot {
+                    provider: Provider::Claude,
+                    model: "another-model",
+                    mode: None,
+                    temperature: 0.5,
+                    messages: &second_messages,
+                    summary: "",
+                    facts: &BTreeMap::new(),
+                    summarized_count: 0,
+                    compression_strategy: CompressionStrategy::Summary,
+                    context_messages: 10,
+                    branches: &HashMap::new(),
+                    checkpoint: None,
+                    active_branch: "main",
+                    branch_pending: false,
+                    profile_id: Some(profile.id),
+                    task_id: Some(task.id),
+                },
+            )
+            .unwrap();
+        drop(store);
+
+        let store = SessionStore::open(&path).unwrap();
+        assert_eq!(store.list_profiles().unwrap(), vec![profile.clone()]);
+        assert_eq!(store.list_tasks().unwrap(), vec![task.clone()]);
+        let loaded = store.load(session_id).unwrap();
+        assert_eq!(loaded.profile, Some(profile.clone()));
+        assert_eq!(loaded.task, Some(task.clone()));
+        assert_eq!(loaded.summary, "summary");
+        assert_eq!(loaded.facts.get("fact").map(String::as_str), Some("value"));
+        assert_eq!(loaded.messages, messages);
+        let second = store.load(second_session_id).unwrap();
+        assert_eq!(
+            second.profile.as_ref().map(|value| value.id),
+            Some(profile.id)
+        );
+        assert_eq!(second.task.as_ref().map(|value| value.id), Some(task.id));
+        assert_eq!(second.messages, second_messages);
+    }
+
+    #[test]
+    fn legacy_session_schema_migrates_without_memory_links() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.db");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    mode TEXT,
+                    temperature REAL NOT NULL,
+                    history_toon TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO sessions
+                 (title, provider, model, temperature, history_toon)
+                 VALUES ('legacy', 'openai', 'old-model', 1.0, 'messages[0]{role,content}:')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = SessionStore::open(&path).unwrap();
+        let loaded = store.load(1).unwrap();
+        assert!(loaded.profile.is_none());
+        assert!(loaded.task.is_none());
+        assert!(loaded.messages.is_empty());
+    }
+
+    #[test]
+    fn agent_prompt_keeps_typed_memory_sections_in_order() {
+        let profile = Profile {
+            id: 7,
+            name: "Кратко".into(),
+            instructions: "Отвечай по-русски".into(),
+        };
+        let task = Task {
+            id: 9,
+            title: "Память".into(),
+            todo: "Проверить слои".into(),
+            phase: TaskPhase::Validation,
+        };
+        for strategy in [
+            CompressionStrategy::Summary,
+            CompressionStrategy::SlidingWindow,
+            CompressionStrategy::StickyFacts,
+            CompressionStrategy::Branching,
+        ] {
+            let mut settings = test_agent_settings();
+            settings.compression_strategy = strategy;
+            let mut agent = Agent::new(1, Client::new(), settings);
+            agent.set_memory(ActiveMemory {
+                profile: Some(profile.clone()),
+                task: Some(task.clone()),
+            });
+            agent.summary = "Краткая история".into();
+            agent.facts.insert("решение".into(), "SQLite".into());
+            let before = agent.memory.clone();
+            let instructions = agent.request_settings().instructions.unwrap();
+            let mode = instructions.find("Отвечай кратко").unwrap();
+            let profile_position = instructions.find("долговременного профиля").unwrap();
+            let task_position = instructions.find("Рабочая память").unwrap();
+            let summary_position = instructions.find("Краткое содержание").unwrap();
+            assert!(mode < profile_position);
+            assert!(profile_position < task_position);
+            assert!(task_position < summary_position);
+            assert!(instructions.contains("Фаза: validation"));
+            assert!(instructions.contains("сам не изменяй её"));
+            if strategy == CompressionStrategy::StickyFacts {
+                assert!(instructions.contains("Важные факты диалога"));
+            } else {
+                assert!(!instructions.contains("Важные факты диалога"));
+            }
+            assert_eq!(agent.memory, before);
+        }
+    }
+
+    #[test]
+    fn agent_memory_can_be_restored_and_is_cleared_with_session() {
+        let mut pool = AgentPool::new(2, Client::new(), test_agent_settings());
+        let memory = ActiveMemory {
+            profile: Some(Profile {
+                id: 1,
+                name: "Профиль".into(),
+                instructions: "Инструкции".into(),
+            }),
+            task: Some(Task {
+                id: 2,
+                title: "Задача".into(),
+                todo: "TODO".into(),
+                phase: TaskPhase::Planning,
+            }),
+        };
+        pool.set_memory(memory.clone());
+        assert!(pool.agents.iter().all(|agent| agent.memory == memory));
+        pool.reset();
+        assert_eq!(pool.memory(), ActiveMemory::default());
+    }
+
+    #[test]
+    fn selecting_new_memory_starts_clean_session_and_preserves_other_layer() {
+        let mut pool = AgentPool::new(1, Client::new(), test_agent_settings());
+        pool.restore(vec![Message {
+            role: "user".into(),
+            content: "Старая история".into(),
+        }]);
+        let memory = ActiveMemory {
+            profile: Some(Profile {
+                id: 3,
+                name: "Профиль".into(),
+                instructions: "Инструкции".into(),
+            }),
+            task: None,
+        };
+        let mut session_id = Some(42);
+        assert!(activate_memory_context(
+            &mut pool,
+            &mut session_id,
+            memory.clone()
+        ));
+        assert!(pool.persisted_history().is_empty());
+        assert_eq!(session_id, None);
+        assert_eq!(pool.memory(), memory);
+    }
+
+    #[test]
+    fn memory_view_and_phase_colors_are_explicit() {
+        let memory = ActiveMemory {
+            profile: Some(Profile {
+                id: 1,
+                name: "Профиль".into(),
+                instructions: "Только русский".into(),
+            }),
+            task: Some(Task {
+                id: 2,
+                title: "Задача".into(),
+                todo: "Проверить вывод".into(),
+                phase: TaskPhase::Execution,
+            }),
+        };
+        let view = format_memory(&memory, 4);
+        assert!(view.contains("Краткосрочная память (сессия): 4 сообщений"));
+        assert!(view.contains("Рабочая память (задача)"));
+        assert!(view.contains("Долговременная память (профиль)"));
+        assert!(!view.contains("api_key"));
+
+        for (phase, ansi) in [
+            (TaskPhase::Planning, "\x1b[34m"),
+            (TaskPhase::Execution, "\x1b[33m"),
+            (TaskPhase::Validation, "\x1b[35m"),
+            (TaskPhase::Done, "\x1b[32m"),
+        ] {
+            let line = format_task_phase_line(phase, true);
+            assert!(line.contains("Этап задачи:"));
+            assert!(line.contains(&phase.to_string()));
+            assert!(line.contains(ansi), "{phase}: {line:?}");
+        }
+        assert!(active_task_phase_line(&memory, true).is_some());
+        assert!(active_task_phase_line(&ActiveMemory::default(), true).is_none());
+        assert_eq!(status_clear_sequence(false), "\r\x1b[2K");
+        assert_eq!(status_clear_sequence(true), "\r\x1b[2K\x1b[1A\r\x1b[2K");
+        let two_lines = status_render_sequence(Some("Этап задачи: planning"), "Статус");
+        assert!(two_lines.find("Этап задачи").unwrap() < two_lines.find("Статус").unwrap());
+        assert!(two_lines.ends_with("\x1b[2A\r"));
+        let one_line = status_render_sequence(None, "Статус");
+        assert!(!one_line.contains("Этап задачи"));
+        assert!(one_line.ends_with("\x1b[1A\r"));
+    }
+
+    #[test]
+    fn deterministic_memory_commands_select_saved_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("commands.db")).unwrap();
+        let profile = store.create_profile("Reviewer", "Проверяй факты").unwrap();
+        let task = store.create_task("Команды", "Проверить выбор").unwrap();
+
+        assert_eq!(
+            handle_profile_command("/profile use Reviewer", &store, None).unwrap(),
+            ProfileCommandOutcome::Select(Some(profile.clone()))
+        );
+        assert_eq!(
+            handle_profile_command("/profile off", &store, Some(&profile)).unwrap(),
+            ProfileCommandOutcome::Select(None)
+        );
+        assert!(handle_profile_command("/profile unknown", &store, None).is_err());
+        assert_eq!(
+            handle_task_command("/task use 1", &store, None).unwrap(),
+            TaskCommandOutcome::Select(Some(task.clone()))
+        );
+        assert_eq!(
+            handle_task_command("/task off", &store, Some(&task)).unwrap(),
+            TaskCommandOutcome::Select(None)
+        );
+        assert!(handle_task_command("/task skip", &store, Some(&task)).is_err());
+
+        assert!(advance_task_if_confirmed(&store, &task, false)
+            .unwrap()
+            .is_none());
+        assert_eq!(store.load_task(task.id).unwrap().phase, TaskPhase::Planning);
+        let advanced = advance_task_if_confirmed(&store, &task, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(advanced.phase, TaskPhase::Execution);
+    }
+
+    #[test]
+    fn cancelled_memory_changes_do_not_write_to_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("cancel.db")).unwrap();
+        assert!(
+            create_profile_if_confirmed(&store, "Не сохранять", "Инструкции", false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            create_task_if_confirmed(&store, "Не сохранять", "TODO", false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.list_profiles().unwrap().is_empty());
+        assert!(store.list_tasks().unwrap().is_empty());
+
+        let task = store.create_task("Сохранённая", "Старый TODO").unwrap();
+        assert!(
+            update_task_todo_if_confirmed(&store, &task, "Новый TODO", false)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.load_task(task.id).unwrap().todo, "Старый TODO");
+    }
+
+    #[test]
+    fn new_session_clears_active_memory_but_not_saved_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("new-session.db")).unwrap();
+        let profile = store.create_profile("Профиль", "Инструкции").unwrap();
+        let task = store.create_task("Задача", "TODO").unwrap();
+        let mut pool = AgentPool::new(1, Client::new(), test_agent_settings());
+        pool.set_memory(ActiveMemory {
+            profile: Some(profile.clone()),
+            task: Some(task.clone()),
+        });
+        pool.reset();
+
+        assert_eq!(pool.memory(), ActiveMemory::default());
+        assert_eq!(store.list_profiles().unwrap(), vec![profile]);
+        assert_eq!(store.list_tasks().unwrap(), vec![task]);
     }
 }

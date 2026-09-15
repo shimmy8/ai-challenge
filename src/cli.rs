@@ -95,11 +95,12 @@ impl Hinter for CommandHelper {
         if commands.iter().any(|(command, _)| *command == line) {
             return None;
         }
-        commands
+        let matches = commands
             .into_iter()
             .map(|(command, _)| command)
-            .find(|command| command.starts_with(line))
-            .map(|command| command[line.len()..].to_owned())
+            .filter(|command| command.starts_with(line))
+            .collect::<Vec<_>>();
+        (matches.len() == 1).then(|| matches[0][line.len()..].to_owned())
     }
 }
 pub(crate) fn expand_command_hint(input: &str, branching_enabled: bool) -> &str {
@@ -110,11 +111,16 @@ pub(crate) fn expand_command_hint(input: &str, branching_enabled: bool) -> &str 
     if commands.iter().any(|(command, _)| *command == input) {
         return input;
     }
-    commands
+    let matches = commands
         .into_iter()
         .map(|(command, _)| command)
-        .find(|command| command.starts_with(input))
-        .unwrap_or(input)
+        .filter(|command| command.starts_with(input))
+        .collect::<Vec<_>>();
+    if matches.len() == 1 {
+        matches[0]
+    } else {
+        input
+    }
 }
 
 pub(crate) fn config_path() -> Result<PathBuf> {
@@ -141,49 +147,146 @@ pub(crate) fn print_banner() {
     println!("{}\n", style("FOX LLM — спроси у лисы").magenta().bold());
 }
 
-pub(crate) fn show_status_bar(
-    provider: Provider,
-    model: &str,
-    mode: &str,
-    temperature: f64,
-    strategy: CompressionStrategy,
-    context_messages: usize,
-    active_branch: Option<&str>,
-) -> Result<()> {
-    let compression = if strategy == CompressionStrategy::Branching {
-        format!("{strategy}:{}", active_branch.unwrap_or("main"))
+pub(crate) struct StatusBar<'a> {
+    pub(crate) provider: Provider,
+    pub(crate) model: &'a str,
+    pub(crate) mode: &'a str,
+    pub(crate) temperature: f64,
+    pub(crate) strategy: CompressionStrategy,
+    pub(crate) context_messages: usize,
+    pub(crate) active_branch: Option<&'a str>,
+    pub(crate) memory: &'a ActiveMemory,
+}
+
+pub(crate) fn show_status_bar(status_bar: StatusBar<'_>) -> Result<()> {
+    let compression = if status_bar.strategy == CompressionStrategy::Branching {
+        format!(
+            "{}:{}",
+            status_bar.strategy,
+            status_bar.active_branch.unwrap_or("main")
+        )
     } else {
-        format!("{strategy}:{context_messages}")
+        format!("{}:{}", status_bar.strategy, status_bar.context_messages)
     };
+    let profile = status_bar
+        .memory
+        .profile
+        .as_ref()
+        .map(|value| value.name.as_str());
+    let task = status_bar
+        .memory
+        .task
+        .as_ref()
+        .map(|value| value.title.as_str());
     let status = format!(
-        "{} {}  {} {}  {} {}  {} {}  {} {}",
+        "{} {}  {} {}  {} {}  {} {}  {} {}{}{}",
         style("Сжатие:").dim(),
         style(compression).cyan().bold(),
         style("Провайдер:").dim(),
-        style(provider).cyan().bold(),
+        style(status_bar.provider).cyan().bold(),
         style("Модель:").dim(),
-        style(model).cyan().bold(),
+        style(status_bar.model).cyan().bold(),
         style("Режим:").dim(),
-        style(mode).cyan().bold(),
+        style(status_bar.mode).cyan().bold(),
         style("Температура:").dim(),
-        style(format_temperature(temperature)).cyan().bold(),
+        style(format_temperature(status_bar.temperature))
+            .cyan()
+            .bold(),
+        profile
+            .map(|_| format!("  {} ", style("Профиль:").dim()))
+            .unwrap_or_default(),
+        profile
+            .map(|name| style(name).cyan().bold().to_string())
+            .unwrap_or_default(),
     );
     // Draw the status one row below the input, then return the cursor to the
     // input row. It is erased as soon as readline finishes, so completed
     // prompts do not leave repeated status lines in terminal scrollback.
     let width = usize::from(Term::stdout().size().1).saturating_sub(1);
     let status = console::truncate_str(&status, width, "…");
-    print!("\n\x1b[2K{status}\x1b[1A\r");
+    if let (Some(task), Some(phase)) = (task, active_task_phase_line(status_bar.memory, false)) {
+        let status = format!(
+            "{status}  {} {}",
+            style("Задача:").dim(),
+            style(task).cyan().bold()
+        );
+        let status = console::truncate_str(&status, width, "…");
+        let phase = console::truncate_str(&phase, width, "…");
+        print!("{}", status_render_sequence(Some(&phase), &status));
+    } else {
+        print!("{}", status_render_sequence(None, &status));
+    }
     std::io::stdout().flush()?;
     Ok(())
 }
 
-pub(crate) fn clear_status_bar() -> Result<()> {
+pub(crate) fn status_render_sequence(phase: Option<&str>, status: &str) -> String {
+    phase.map_or_else(
+        || format!("\n\x1b[2K{status}\x1b[1A\r"),
+        |phase| format!("\n\x1b[2K{phase}\n\x1b[2K{status}\x1b[2A\r"),
+    )
+}
+
+pub(crate) fn clear_status_bar(has_task: bool) -> Result<()> {
     // Enter leaves the cursor on the status row. Clear it before printing the
     // command result and reuse that row for normal output.
-    print!("\r\x1b[2K");
+    print!("{}", status_clear_sequence(has_task));
     std::io::stdout().flush()?;
     Ok(())
+}
+
+pub(crate) fn status_clear_sequence(has_task: bool) -> &'static str {
+    if has_task {
+        "\r\x1b[2K\x1b[1A\r\x1b[2K"
+    } else {
+        "\r\x1b[2K"
+    }
+}
+
+pub(crate) fn active_task_phase_line(memory: &ActiveMemory, force_color: bool) -> Option<String> {
+    memory
+        .task
+        .as_ref()
+        .map(|task| format_task_phase_line(task.phase, force_color))
+}
+
+pub(crate) fn format_task_phase_line(phase: TaskPhase, force_color: bool) -> String {
+    let phase = match phase {
+        TaskPhase::Planning => style(phase).blue().bold(),
+        TaskPhase::Execution => style(phase).yellow().bold(),
+        TaskPhase::Validation => style(phase).magenta().bold(),
+        TaskPhase::Done => style(phase).green().bold(),
+    };
+    let phase = if force_color {
+        phase.force_styling(true)
+    } else {
+        phase
+    };
+    format!("{} {phase}", style("Этап задачи:").dim())
+}
+
+pub(crate) fn format_memory(memory: &ActiveMemory, message_count: usize) -> String {
+    let profile = memory.profile.as_ref().map_or_else(
+        || "не выбран".to_owned(),
+        |profile| {
+            format!(
+                "#{} «{}»\n{}",
+                profile.id, profile.name, profile.instructions
+            )
+        },
+    );
+    let task = memory.task.as_ref().map_or_else(
+        || "не выбрана".to_owned(),
+        |task| {
+            format!(
+                "#{} «{}»\nФаза: {}\nTODO: {}",
+                task.id, task.title, task.phase, task.todo
+            )
+        },
+    );
+    format!(
+        "Краткосрочная память (сессия): {message_count} сообщений\n\nРабочая память (задача):\n{task}\n\nДолговременная память (профиль):\n{profile}"
+    )
 }
 
 pub(crate) fn print_help(branching_enabled: bool) {
