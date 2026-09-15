@@ -58,6 +58,10 @@ pub(crate) async fn run() -> Result<()> {
         client.clone(),
         AgentSettings::from_config(&config, provider, initial_mode)?,
     );
+    agents.set_memory(ActiveMemory {
+        long_term_facts: sessions.list_memory_entries()?,
+        ..ActiveMemory::default()
+    });
     let branching_commands_enabled = Arc::new(AtomicBool::new(
         config.compression_strategy == CompressionStrategy::Branching,
     ));
@@ -220,6 +224,7 @@ pub(crate) async fn run() -> Result<()> {
                 agents.set_memory(ActiveMemory {
                     profile: session.profile.clone(),
                     task: session.task.clone(),
+                    long_term_facts: sessions.list_memory_entries()?,
                 });
                 active_session_id = Some(session.id);
                 println!(
@@ -391,6 +396,29 @@ pub(crate) async fn run() -> Result<()> {
                         memory.task = Some(task);
                         agents.set_memory(memory);
                     }
+                }
+                continue;
+            }
+            command if command == "/remember" || command.starts_with("/remember ") => {
+                if let Some(entry) = handle_remember_command(command, &sessions)? {
+                    let mut memory = agents.memory();
+                    memory.long_term_facts = sessions.list_memory_entries()?;
+                    agents.set_memory(memory);
+                    println!(
+                        "{} #{}: {}",
+                        style("Долговременный факт сохранён.").yellow(),
+                        entry.id,
+                        entry.content
+                    );
+                }
+                continue;
+            }
+            command if command == "/forget" || command.starts_with("/forget ") => {
+                if handle_forget_command(command, &sessions)? {
+                    let mut memory = agents.memory();
+                    memory.long_term_facts = sessions.list_memory_entries()?;
+                    agents.set_memory(memory);
+                    println!("{}", style("Долговременный факт удалён.").yellow());
                 }
                 continue;
             }
@@ -623,7 +651,7 @@ pub(crate) fn handle_profile_command(
                 "Отключить профиль",
             ];
             let Some(action) = Select::with_theme(&ColorfulTheme::default())
-                .with_prompt("Долговременная память")
+                .with_prompt("Профиль персонализации")
                 .items(&actions)
                 .default(0)
                 .interact_opt()?
@@ -668,7 +696,11 @@ fn create_profile_interactive(store: &SessionStore) -> Result<ProfileCommandOutc
                 .map_err(|error| error.to_string())
         })
         .interact_text()?;
-    let instructions = prompt_multiline("Краткие инструкции профиля")?;
+    let response_style = prompt_profile_field("Стиль ответа")?;
+    let response_format = prompt_profile_field("Формат ответа")?;
+    let constraints = prompt_profile_field("Ограничения ответа")?;
+    let instructions =
+        compose_profile_instructions(&response_style, &response_format, &constraints)?;
     validate_profile(&name, &instructions)?;
     let confirmed = Confirm::with_theme(&ColorfulTheme::default())
         .with_prompt(format!("Сохранить профиль «{}»?", name.trim()))
@@ -679,6 +711,77 @@ fn create_profile_interactive(store: &SessionStore) -> Result<ProfileCommandOutc
         return Ok(ProfileCommandOutcome::Unchanged);
     };
     Ok(ProfileCommandOutcome::Select(Some(profile)))
+}
+
+fn prompt_profile_field(label: &str) -> Result<String> {
+    Input::with_theme(&ColorfulTheme::default())
+        .with_prompt(format_profile_field_prompt(label, false))
+        .validate_with(|value: &String| {
+            validate_memory_text(value, label, PROFILE_INSTRUCTIONS_MAX_CHARS)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .interact_text()
+        .map_err(Into::into)
+}
+
+pub(crate) fn handle_remember_command(
+    command: &str,
+    store: &SessionStore,
+) -> Result<Option<MemoryEntry>> {
+    let arguments = command.strip_prefix("/remember").unwrap_or_default().trim();
+    if !arguments.is_empty() {
+        return store.create_memory_entry(arguments).map(Some);
+    }
+    let content = prompt_multiline("Долговременный факт")?;
+    validate_memory_entry(&content)?;
+    let confirmed = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("Сохранить факт в долговременную память?")
+        .default(true)
+        .interact()?;
+    create_memory_entry_if_confirmed(store, &content, confirmed)
+}
+
+pub(crate) fn create_memory_entry_if_confirmed(
+    store: &SessionStore,
+    content: &str,
+    confirmed: bool,
+) -> Result<Option<MemoryEntry>> {
+    if confirmed {
+        store.create_memory_entry(content).map(Some)
+    } else {
+        println!("{}", style("Сохранение факта отменено.").dim());
+        Ok(None)
+    }
+}
+
+pub(crate) fn handle_forget_command(command: &str, store: &SessionStore) -> Result<bool> {
+    let arguments = command.strip_prefix("/forget").unwrap_or_default().trim();
+    let id = arguments
+        .parse::<i64>()
+        .context("используйте /forget <id>")?;
+    let entry = store.load_memory_entry(id)?;
+    let confirmed = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("Удалить факт #{}: {}?", entry.id, entry.content))
+        .default(false)
+        .interact()?;
+    let deleted = forget_memory_entry_if_confirmed(store, &entry, confirmed)?;
+    if !deleted {
+        println!("{}", style("Удаление факта отменено.").dim());
+    }
+    Ok(deleted)
+}
+
+pub(crate) fn forget_memory_entry_if_confirmed(
+    store: &SessionStore,
+    entry: &MemoryEntry,
+    confirmed: bool,
+) -> Result<bool> {
+    if !confirmed {
+        return Ok(false);
+    }
+    store.delete_memory_entry(entry.id)?;
+    Ok(true)
 }
 
 pub(crate) fn create_profile_if_confirmed(

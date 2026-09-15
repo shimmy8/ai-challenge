@@ -35,17 +35,7 @@ pub(crate) async fn send_openai(
     settings: &AgentSettings,
     history: &[Message],
 ) -> Result<ApiAnswer> {
-    let mut payload = json!({
-        "model": settings.model,
-        "input": history,
-        "temperature": settings.temperature
-    });
-    if supports_temperature_with_reasoning_none(&settings.model) {
-        payload["reasoning"] = json!({ "effort": "none" });
-    }
-    if let Some(instructions) = &settings.instructions {
-        payload["instructions"] = json!(instructions);
-    }
+    let payload = build_openai_payload(settings, history);
     let response = client
         .post("https://api.openai.com/v1/responses")
         .bearer_auth(&settings.api_key)
@@ -73,20 +63,27 @@ pub(crate) async fn send_openai(
     })
 }
 
+pub(crate) fn build_openai_payload(settings: &AgentSettings, history: &[Message]) -> Value {
+    let mut payload = json!({
+        "model": settings.model,
+        "input": history,
+        "temperature": settings.temperature
+    });
+    if supports_temperature_with_reasoning_none(&settings.model) {
+        payload["reasoning"] = json!({ "effort": "none" });
+    }
+    if let Some(instructions) = &settings.instructions {
+        payload["instructions"] = json!(instructions);
+    }
+    payload
+}
+
 pub(crate) async fn send_claude(
     client: &Client,
     settings: &AgentSettings,
     history: &[Message],
 ) -> Result<ApiAnswer> {
-    let mut payload = json!({
-        "model": settings.model,
-        "max_tokens": 4096,
-        "temperature": settings.temperature,
-        "messages": history
-    });
-    if let Some(instructions) = &settings.instructions {
-        payload["system"] = json!(instructions);
-    }
+    let payload = build_claude_payload(settings, history);
     let response = client
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", &settings.api_key)
@@ -113,6 +110,19 @@ pub(crate) async fn send_claude(
         session_input_tokens: 0,
         session_output_tokens: 0,
     })
+}
+
+pub(crate) fn build_claude_payload(settings: &AgentSettings, history: &[Message]) -> Value {
+    let mut payload = json!({
+        "model": settings.model,
+        "max_tokens": 4096,
+        "temperature": settings.temperature,
+        "messages": history
+    });
+    if let Some(instructions) = &settings.instructions {
+        payload["system"] = json!(instructions);
+    }
+    payload
 }
 
 pub(crate) async fn read_response(response: reqwest::Response) -> Result<(StatusCode, Value)> {

@@ -87,6 +87,11 @@ impl SessionStore {
                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );
+             CREATE TABLE IF NOT EXISTS memory_entries (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 content TEXT NOT NULL,
+                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
              CREATE TABLE IF NOT EXISTS tasks (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  title TEXT NOT NULL,
@@ -436,6 +441,54 @@ impl SessionStore {
             )
             .with_context(|| format!("не удалось создать профиль «{name}»"))?;
         self.load_profile(self.connection.last_insert_rowid())
+    }
+
+    pub(crate) fn create_memory_entry(&self, content: &str) -> Result<MemoryEntry> {
+        let content = validate_memory_entry(content)?;
+        self.connection
+            .execute(
+                "INSERT INTO memory_entries (content) VALUES (?1)",
+                [content.as_str()],
+            )
+            .context("не удалось сохранить долговременный факт")?;
+        self.load_memory_entry(self.connection.last_insert_rowid())
+    }
+
+    pub(crate) fn list_memory_entries(&self) -> Result<Vec<MemoryEntry>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT id, content FROM memory_entries ORDER BY id")?;
+        let rows = statement.query_map([], |row| {
+            Ok(MemoryEntry {
+                id: row.get(0)?,
+                content: row.get(1)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn load_memory_entry(&self, id: i64) -> Result<MemoryEntry> {
+        self.connection
+            .query_row(
+                "SELECT id, content FROM memory_entries WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok(MemoryEntry {
+                        id: row.get(0)?,
+                        content: row.get(1)?,
+                    })
+                },
+            )
+            .with_context(|| format!("долговременный факт #{id} не найден"))
+    }
+
+    pub(crate) fn delete_memory_entry(&self, id: i64) -> Result<()> {
+        let deleted = self
+            .connection
+            .execute("DELETE FROM memory_entries WHERE id = ?1", [id])?;
+        anyhow::ensure!(deleted == 1, "долговременный факт #{id} не найден");
+        Ok(())
     }
 
     pub(crate) fn list_profiles(&self) -> Result<Vec<Profile>> {

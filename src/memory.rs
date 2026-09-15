@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 
 pub(crate) const MEMORY_NAME_MAX_CHARS: usize = 80;
+pub(crate) const MEMORY_ENTRY_MAX_CHARS: usize = 1000;
 pub(crate) const PROFILE_INSTRUCTIONS_MAX_CHARS: usize = 2000;
 pub(crate) const TASK_TITLE_MAX_CHARS: usize = 120;
 pub(crate) const TASK_TODO_MAX_CHARS: usize = 2000;
@@ -12,6 +13,12 @@ pub(crate) struct Profile {
     pub(crate) id: i64,
     pub(crate) name: String,
     pub(crate) instructions: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MemoryEntry {
+    pub(crate) id: i64,
+    pub(crate) content: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,6 +95,7 @@ pub(crate) struct Task {
 pub(crate) struct ActiveMemory {
     pub(crate) profile: Option<Profile>,
     pub(crate) task: Option<Task>,
+    pub(crate) long_term_facts: Vec<MemoryEntry>,
 }
 
 pub(crate) fn validate_memory_text(value: &str, label: &str, max_chars: usize) -> Result<String> {
@@ -111,6 +119,39 @@ pub(crate) fn validate_profile(name: &str, instructions: &str) -> Result<(String
             PROFILE_INSTRUCTIONS_MAX_CHARS,
         )?,
     ))
+}
+
+pub(crate) fn validate_memory_entry(content: &str) -> Result<String> {
+    validate_memory_text(content, "долговременный факт", MEMORY_ENTRY_MAX_CHARS)
+}
+
+pub(crate) fn compose_profile_instructions(
+    response_style: &str,
+    response_format: &str,
+    constraints: &str,
+) -> Result<String> {
+    let response_style = validate_memory_text(
+        response_style,
+        "стиль ответа",
+        PROFILE_INSTRUCTIONS_MAX_CHARS,
+    )?;
+    let response_format = validate_memory_text(
+        response_format,
+        "формат ответа",
+        PROFILE_INSTRUCTIONS_MAX_CHARS,
+    )?;
+    let constraints = validate_memory_text(
+        constraints,
+        "ограничения ответа",
+        PROFILE_INSTRUCTIONS_MAX_CHARS,
+    )?;
+    validate_memory_text(
+        &format!(
+            "Стиль:\n{response_style}\n\nФормат:\n{response_format}\n\nОграничения:\n{constraints}"
+        ),
+        "инструкции профиля",
+        PROFILE_INSTRUCTIONS_MAX_CHARS,
+    )
 }
 
 pub(crate) fn validate_task(title: &str, todo: &str) -> Result<(String, String)> {

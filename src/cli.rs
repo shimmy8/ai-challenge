@@ -265,6 +265,16 @@ pub(crate) fn format_task_phase_line(phase: TaskPhase, force_color: bool) -> Str
     format!("{} {phase}", style("Этап задачи:").dim())
 }
 
+pub(crate) fn format_profile_field_prompt(label: &str, force_color: bool) -> String {
+    let label = style(label).yellow().bold();
+    let label = if force_color {
+        label.force_styling(true)
+    } else {
+        label
+    };
+    label.to_string()
+}
+
 pub(crate) fn format_memory(memory: &ActiveMemory, message_count: usize) -> String {
     let profile = memory.profile.as_ref().map_or_else(
         || "не выбран".to_owned(),
@@ -284,8 +294,18 @@ pub(crate) fn format_memory(memory: &ActiveMemory, message_count: usize) -> Stri
             )
         },
     );
+    let long_term_facts = if memory.long_term_facts.is_empty() {
+        "нет сохранённых фактов".to_owned()
+    } else {
+        memory
+            .long_term_facts
+            .iter()
+            .map(|fact| format!("#{}: {}", fact.id, fact.content))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     format!(
-        "Краткосрочная память (сессия): {message_count} сообщений\n\nРабочая память (задача):\n{task}\n\nДолговременная память (профиль):\n{profile}"
+        "Краткосрочная память (сессия): {message_count} сообщений\n\nРабочая память (задача):\n{task}\n\nДолговременная память (факты):\n{long_term_facts}\n\nПрофиль персонализации:\n{profile}"
     )
 }
 
