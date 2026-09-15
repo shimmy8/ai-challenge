@@ -1,5 +1,7 @@
 #![allow(unused_imports)]
-use crate::{agent::*, cli::*, config::*, metrics::*, model::*, providers::*, sessions::*};
+use crate::{
+    agent::*, cli::*, config::*, memory::*, metrics::*, model::*, providers::*, sessions::*,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use console::{style, Key, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect, Input, Select};
@@ -62,24 +64,26 @@ pub(crate) async fn run() -> Result<()> {
     let mut editor = Editor::<CommandHelper, DefaultHistory>::new()?;
     editor.set_helper(Some(CommandHelper::new(branching_commands_enabled.clone())));
     loop {
-        show_status_bar(
+        let displayed_memory = agents.memory();
+        show_status_bar(StatusBar {
             provider,
-            config.model(provider)?,
-            mode_name(&modes, active_mode),
-            config.temperature(provider)?,
-            config.compression_strategy,
-            config.context_messages,
-            agents.agents.first().map(|agent| {
+            model: config.model(provider)?,
+            mode: mode_name(&modes, active_mode),
+            temperature: config.temperature(provider)?,
+            strategy: config.compression_strategy,
+            context_messages: config.context_messages,
+            active_branch: agents.agents.first().map(|agent| {
                 if agent.branch_pending {
                     "checkpoint"
                 } else {
                     agent.active_branch.as_str()
                 }
             }),
-        )?;
+            memory: &displayed_memory,
+        })?;
         let prompt = format!("{} ", style("Вы ›").green().bold());
         let readline_result = editor.readline(&prompt);
-        clear_status_bar()?;
+        clear_status_bar(displayed_memory.task.is_some())?;
         let input = match readline_result {
             Ok(value) => value.trim().to_owned(),
             Err(ReadlineError::Interrupted | ReadlineError::Eof) => break,
@@ -213,6 +217,10 @@ pub(crate) async fn run() -> Result<()> {
                         }
                     }
                 }
+                agents.set_memory(ActiveMemory {
+                    profile: session.profile.clone(),
+                    task: session.task.clone(),
+                });
                 active_session_id = Some(session.id);
                 println!(
                     "{} {}. {} {}. {} {}.\n",
@@ -226,6 +234,7 @@ pub(crate) async fn run() -> Result<()> {
                 continue;
             }
             "/provider" => {
+                let memory = agents.memory();
                 provider = choose_provider()?;
                 authorize_if_needed(&mut config, provider, &config_path)?;
                 remember_provider(&mut config, provider, &config_path)?;
@@ -234,6 +243,7 @@ pub(crate) async fn run() -> Result<()> {
                     provider,
                     active_mode.and_then(|index| modes.modes.get(index)),
                 )?);
+                agents.set_memory(memory);
                 active_session_id = None;
                 println!(
                     "{} {}. {} {}. {} {}\n",
@@ -258,11 +268,13 @@ pub(crate) async fn run() -> Result<()> {
                     normalized_temperature(provider, &model, config.temperature(provider)?);
                 config.set_temperature(provider, temperature)?;
                 config.save(&config_path)?;
+                let memory = agents.memory();
                 agents.reconfigure(AgentSettings::from_config(
                     &config,
                     provider,
                     active_mode.and_then(|index| modes.modes.get(index)),
                 )?);
+                agents.set_memory(memory);
                 active_session_id = None;
                 println!(
                     "{} {}. {} {}. {}\n",
@@ -276,11 +288,13 @@ pub(crate) async fn run() -> Result<()> {
             }
             "/mode" => {
                 active_mode = choose_mode(&mut config, &mut modes, &config_path, &modes_path)?;
+                let memory = agents.memory();
                 agents.reconfigure(AgentSettings::from_config(
                     &config,
                     provider,
                     active_mode.and_then(|index| modes.modes.get(index)),
                 )?);
+                agents.set_memory(memory);
                 active_session_id = None;
                 println!(
                     "{} {}. {}\n",
@@ -301,17 +315,89 @@ pub(crate) async fn run() -> Result<()> {
                 };
                 config.set_temperature(provider, temperature)?;
                 config.save(&config_path)?;
+                let memory = agents.memory();
                 agents.reconfigure(AgentSettings::from_config(
                     &config,
                     provider,
                     active_mode.and_then(|index| modes.modes.get(index)),
                 )?);
+                agents.set_memory(memory);
                 active_session_id = None;
                 println!(
                     "{} {}. {}\n",
                     style("Температура изменена на").yellow(),
                     style(format_temperature(temperature)).cyan().bold(),
                     style("Начата новая сессия.").dim()
+                );
+                continue;
+            }
+            command if command == "/profile" || command.starts_with("/profile ") => {
+                let current = agents.memory();
+                match handle_profile_command(command, &sessions, current.profile.as_ref())? {
+                    ProfileCommandOutcome::Unchanged => {}
+                    ProfileCommandOutcome::Select(profile) => {
+                        if current.profile.as_ref().map(|value| value.id)
+                            != profile.as_ref().map(|value| value.id)
+                        {
+                            let mut memory = current;
+                            memory.profile = profile;
+                            let started = activate_memory_context(
+                                &mut agents,
+                                &mut active_session_id,
+                                memory,
+                            );
+                            println!(
+                                "{}{}",
+                                style("Профиль обновлён.").yellow(),
+                                if started {
+                                    format!(" {}", style("Начата новая сессия.").dim())
+                                } else {
+                                    String::new()
+                                }
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+            command if command == "/task" || command.starts_with("/task ") => {
+                let current = agents.memory();
+                match handle_task_command(command, &sessions, current.task.as_ref())? {
+                    TaskCommandOutcome::Unchanged => {}
+                    TaskCommandOutcome::Select(task) => {
+                        if current.task.as_ref().map(|value| value.id)
+                            != task.as_ref().map(|value| value.id)
+                        {
+                            let mut memory = current;
+                            memory.task = task;
+                            let started = activate_memory_context(
+                                &mut agents,
+                                &mut active_session_id,
+                                memory,
+                            );
+                            println!(
+                                "{}{}",
+                                style("Активная задача обновлена.").yellow(),
+                                if started {
+                                    format!(" {}", style("Начата новая сессия.").dim())
+                                } else {
+                                    String::new()
+                                }
+                            );
+                        }
+                    }
+                    TaskCommandOutcome::Refresh(task) => {
+                        let mut memory = current;
+                        memory.task = Some(task);
+                        agents.set_memory(memory);
+                    }
+                }
+                continue;
+            }
+            "/memory" => {
+                println!(
+                    "{}\n",
+                    format_memory(&agents.memory(), agents.persisted_history().len())
                 );
                 continue;
             }
@@ -402,6 +488,8 @@ pub(crate) async fn run() -> Result<()> {
                         checkpoint: agents.agents[0].checkpoint.as_ref(),
                         active_branch: &agents.agents[0].active_branch,
                         branch_pending: agents.agents[0].branch_pending,
+                        profile_id: agents.memory().profile.map(|profile| profile.id),
+                        task_id: agents.memory().task.map(|task| task.id),
                     },
                 )?,
             );
@@ -473,4 +561,335 @@ pub(crate) async fn run() -> Result<()> {
     }
     println!("{}", style("До встречи! 🦊").magenta());
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ProfileCommandOutcome {
+    Unchanged,
+    Select(Option<Profile>),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TaskCommandOutcome {
+    Unchanged,
+    Select(Option<Task>),
+    Refresh(Task),
+}
+
+pub(crate) fn activate_memory_context(
+    agents: &mut AgentPool,
+    active_session_id: &mut Option<i64>,
+    memory: ActiveMemory,
+) -> bool {
+    let started = !agents.persisted_history().is_empty();
+    if started {
+        agents.reset();
+        *active_session_id = None;
+    }
+    agents.set_memory(memory);
+    started
+}
+
+pub(crate) fn handle_profile_command(
+    command: &str,
+    store: &SessionStore,
+    current: Option<&Profile>,
+) -> Result<ProfileCommandOutcome> {
+    let arguments = command.strip_prefix("/profile").unwrap_or_default().trim();
+    match arguments.split_once(' ').unwrap_or((arguments, "")) {
+        ("show", _) => {
+            match current {
+                Some(profile) => println!(
+                    "{} #{} «{}»\n{}",
+                    style("Активный профиль:").yellow(),
+                    profile.id,
+                    profile.name,
+                    profile.instructions
+                ),
+                None => println!("{}", style("Профиль не выбран.").dim()),
+            }
+            Ok(ProfileCommandOutcome::Unchanged)
+        }
+        ("off", _) => Ok(ProfileCommandOutcome::Select(None)),
+        ("use", query) if !query.trim().is_empty() => Ok(ProfileCommandOutcome::Select(Some(
+            find_profile(store, query.trim())?,
+        ))),
+        ("new", _) => create_profile_interactive(store),
+        ("", _) => {
+            let actions = [
+                "Просмотреть активный профиль",
+                "Выбрать сохранённый профиль",
+                "Создать новый профиль",
+                "Отключить профиль",
+            ];
+            let Some(action) = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt("Долговременная память")
+                .items(&actions)
+                .default(0)
+                .interact_opt()?
+            else {
+                return Ok(ProfileCommandOutcome::Unchanged);
+            };
+            match action {
+                0 => handle_profile_command("/profile show", store, current),
+                1 => {
+                    let profiles = store.list_profiles()?;
+                    if profiles.is_empty() {
+                        println!("{}", style("Сохранённых профилей пока нет.").dim());
+                        return Ok(ProfileCommandOutcome::Unchanged);
+                    }
+                    let names = profiles
+                        .iter()
+                        .map(|profile| format!("#{} · {}", profile.id, profile.name))
+                        .collect::<Vec<_>>();
+                    let selected = Select::with_theme(&ColorfulTheme::default())
+                        .with_prompt("Выберите профиль")
+                        .items(&names)
+                        .default(0)
+                        .interact_opt()?;
+                    Ok(selected.map_or(ProfileCommandOutcome::Unchanged, |index| {
+                        ProfileCommandOutcome::Select(Some(profiles[index].clone()))
+                    }))
+                }
+                2 => create_profile_interactive(store),
+                _ => Ok(ProfileCommandOutcome::Select(None)),
+            }
+        }
+        _ => bail!("используйте /profile, /profile show, /profile new, /profile use <id|имя> или /profile off"),
+    }
+}
+
+fn create_profile_interactive(store: &SessionStore) -> Result<ProfileCommandOutcome> {
+    let name: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Название профиля")
+        .validate_with(|value: &String| {
+            validate_memory_text(value, "название профиля", MEMORY_NAME_MAX_CHARS)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .interact_text()?;
+    let instructions = prompt_multiline("Краткие инструкции профиля")?;
+    validate_profile(&name, &instructions)?;
+    let confirmed = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("Сохранить профиль «{}»?", name.trim()))
+        .default(true)
+        .interact()?;
+    let Some(profile) = create_profile_if_confirmed(store, &name, &instructions, confirmed)? else {
+        println!("{}", style("Создание профиля отменено.").dim());
+        return Ok(ProfileCommandOutcome::Unchanged);
+    };
+    Ok(ProfileCommandOutcome::Select(Some(profile)))
+}
+
+pub(crate) fn create_profile_if_confirmed(
+    store: &SessionStore,
+    name: &str,
+    instructions: &str,
+    confirmed: bool,
+) -> Result<Option<Profile>> {
+    if confirmed {
+        store.create_profile(name, instructions).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn find_profile(store: &SessionStore, query: &str) -> Result<Profile> {
+    if let Ok(id) = query.parse::<i64>() {
+        return store.load_profile(id);
+    }
+    store
+        .list_profiles()?
+        .into_iter()
+        .find(|profile| profile.name == query)
+        .with_context(|| format!("профиль «{query}» не найден"))
+}
+
+pub(crate) fn handle_task_command(
+    command: &str,
+    store: &SessionStore,
+    current: Option<&Task>,
+) -> Result<TaskCommandOutcome> {
+    let arguments = command.strip_prefix("/task").unwrap_or_default().trim();
+    let (action, value) = arguments.split_once(' ').unwrap_or((arguments, ""));
+    match action {
+        "show" => {
+            match current {
+                Some(task) => println!(
+                    "{} #{} «{}»\nФаза: {}\nTODO: {}",
+                    style("Активная задача:").yellow(),
+                    task.id,
+                    task.title,
+                    task.phase,
+                    task.todo
+                ),
+                None => println!("{}", style("Задача не выбрана.").dim()),
+            }
+            Ok(TaskCommandOutcome::Unchanged)
+        }
+        "off" => Ok(TaskCommandOutcome::Select(None)),
+        "use" if !value.trim().is_empty() => Ok(TaskCommandOutcome::Select(Some(find_task(
+            store,
+            value.trim(),
+        )?))),
+        "new" => create_task_interactive(store),
+        "todo" => {
+            let task = current.context("сначала выберите задачу через /task")?;
+            let todo = if value.trim().is_empty() {
+                prompt_multiline("Новый краткий TODO задачи")?
+            } else {
+                value.trim().to_owned()
+            };
+            validate_memory_text(&todo, "TODO задачи", TASK_TODO_MAX_CHARS)?;
+            let confirmed = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt("Заменить TODO активной задачи?")
+                .default(true)
+                .interact()?;
+            let Some(task) = update_task_todo_if_confirmed(store, task, &todo, confirmed)? else {
+                println!("{}", style("TODO не изменён.").dim());
+                return Ok(TaskCommandOutcome::Unchanged);
+            };
+            println!("{}", style("TODO задачи обновлён.").yellow());
+            Ok(TaskCommandOutcome::Refresh(task))
+        }
+        "next" => {
+            let task = current.context("сначала выберите задачу через /task")?;
+            let next = task
+                .phase
+                .next()
+                .with_context(|| format!("задача «{}» уже завершена", task.title))?;
+            let confirmed = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!("Перейти {} -> {}?", task.phase, next))
+                .default(false)
+                .interact()?;
+            let Some(task) = advance_task_if_confirmed(store, task, confirmed)? else {
+                println!("{}", style("Фаза задачи не изменена.").dim());
+                return Ok(TaskCommandOutcome::Unchanged);
+            };
+            println!(
+                "{} {}",
+                style("Новая фаза задачи:").yellow(),
+                style(task.phase).cyan().bold()
+            );
+            Ok(TaskCommandOutcome::Refresh(task))
+        }
+        "" => choose_task_action(store, current),
+        _ => bail!("используйте /task, /task show, /task new, /task use <id|имя>, /task todo [текст], /task next или /task off"),
+    }
+}
+
+pub(crate) fn advance_task_if_confirmed(
+    store: &SessionStore,
+    task: &Task,
+    confirmed: bool,
+) -> Result<Option<Task>> {
+    if confirmed {
+        store.advance_task(task.id).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+pub(crate) fn update_task_todo_if_confirmed(
+    store: &SessionStore,
+    task: &Task,
+    todo: &str,
+    confirmed: bool,
+) -> Result<Option<Task>> {
+    if confirmed {
+        store.update_task_todo(task.id, todo).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn choose_task_action(store: &SessionStore, current: Option<&Task>) -> Result<TaskCommandOutcome> {
+    let actions = [
+        "Просмотреть активную задачу",
+        "Продолжить сохранённую задачу",
+        "Создать новую задачу",
+        "Изменить TODO",
+        "Перейти к следующему этапу",
+        "Отключить задачу",
+    ];
+    let Some(action) = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Рабочая память")
+        .items(&actions)
+        .default(0)
+        .interact_opt()?
+    else {
+        return Ok(TaskCommandOutcome::Unchanged);
+    };
+    match action {
+        0 => handle_task_command("/task show", store, current),
+        1 => {
+            let tasks = store.list_tasks()?;
+            if tasks.is_empty() {
+                println!("{}", style("Сохранённых задач пока нет.").dim());
+                return Ok(TaskCommandOutcome::Unchanged);
+            }
+            let names = tasks
+                .iter()
+                .map(|task| format!("#{} · {} · {}", task.id, task.phase, task.title))
+                .collect::<Vec<_>>();
+            let selected = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt("Выберите задачу")
+                .items(&names)
+                .default(0)
+                .interact_opt()?;
+            Ok(selected.map_or(TaskCommandOutcome::Unchanged, |index| {
+                TaskCommandOutcome::Select(Some(tasks[index].clone()))
+            }))
+        }
+        2 => create_task_interactive(store),
+        3 => handle_task_command("/task todo", store, current),
+        4 => handle_task_command("/task next", store, current),
+        _ => Ok(TaskCommandOutcome::Select(None)),
+    }
+}
+
+fn create_task_interactive(store: &SessionStore) -> Result<TaskCommandOutcome> {
+    let title: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Название задачи")
+        .validate_with(|value: &String| {
+            validate_memory_text(value, "название задачи", TASK_TITLE_MAX_CHARS)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .interact_text()?;
+    let todo = prompt_multiline("Краткий TODO задачи")?;
+    validate_task(&title, &todo)?;
+    let confirmed = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("Создать задачу «{}»?", title.trim()))
+        .default(true)
+        .interact()?;
+    let Some(task) = create_task_if_confirmed(store, &title, &todo, confirmed)? else {
+        println!("{}", style("Создание задачи отменено.").dim());
+        return Ok(TaskCommandOutcome::Unchanged);
+    };
+    Ok(TaskCommandOutcome::Select(Some(task)))
+}
+
+pub(crate) fn create_task_if_confirmed(
+    store: &SessionStore,
+    title: &str,
+    todo: &str,
+    confirmed: bool,
+) -> Result<Option<Task>> {
+    if confirmed {
+        store.create_task(title, todo).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn find_task(store: &SessionStore, query: &str) -> Result<Task> {
+    if let Ok(id) = query.parse::<i64>() {
+        return store.load_task(id);
+    }
+    store
+        .list_tasks()?
+        .into_iter()
+        .find(|task| task.title == query)
+        .with_context(|| format!("задача «{query}» не найдена"))
 }

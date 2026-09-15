@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-use crate::{agent::Agent, cli::parse_compression_strategy, config::*, model::*};
+use crate::{agent::Agent, cli::parse_compression_strategy, config::*, memory::*, model::*};
 use anyhow::{anyhow, bail, Context, Result};
 use console::{style, Key, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect, Input, Select};
@@ -42,6 +42,8 @@ pub(crate) struct SavedSession {
     pub(crate) checkpoint: Option<BranchState>,
     pub(crate) active_branch: String,
     pub(crate) branch_pending: bool,
+    pub(crate) profile: Option<Profile>,
+    pub(crate) task: Option<Task>,
 }
 
 pub(crate) struct SessionStore {
@@ -63,6 +65,8 @@ pub(crate) struct SessionSnapshot<'a> {
     pub(crate) checkpoint: Option<&'a BranchState>,
     pub(crate) active_branch: &'a str,
     pub(crate) branch_pending: bool,
+    pub(crate) profile_id: Option<i64>,
+    pub(crate) task_id: Option<i64>,
 }
 
 impl SessionStore {
@@ -76,6 +80,21 @@ impl SessionStore {
         }
         connection.execute_batch(
             "PRAGMA journal_mode = WAL;
+             CREATE TABLE IF NOT EXISTS profiles (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name TEXT NOT NULL UNIQUE,
+                 instructions TEXT NOT NULL,
+                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
+             CREATE TABLE IF NOT EXISTS tasks (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 title TEXT NOT NULL,
+                 todo TEXT NOT NULL,
+                 phase TEXT NOT NULL DEFAULT 'planning',
+                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
              CREATE TABLE IF NOT EXISTS sessions (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  title TEXT NOT NULL,
@@ -84,6 +103,8 @@ impl SessionStore {
                  mode TEXT,
                  temperature REAL NOT NULL,
                  history_toon TEXT NOT NULL,
+                 profile_id INTEGER REFERENCES profiles(id) ON DELETE SET NULL,
+                 task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );
@@ -113,6 +134,20 @@ impl SessionStore {
              );
              PRAGMA foreign_keys = ON;",
         )?;
+        for (column, definition) in [
+            (
+                "profile_id",
+                "profile_id INTEGER REFERENCES profiles(id) ON DELETE SET NULL",
+            ),
+            (
+                "task_id",
+                "task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL",
+            ),
+        ] {
+            if !has_column(&connection, "sessions", column)? {
+                connection.execute(&format!("ALTER TABLE sessions ADD COLUMN {definition}"), [])?;
+            }
+        }
         let has_facts_column = {
             let mut statement = connection.prepare("PRAGMA table_info(session_context)")?;
             let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
@@ -172,7 +207,8 @@ impl SessionStore {
         let saved_id = if let Some(id) = id {
             self.connection.execute(
                 "UPDATE sessions SET title = ?1, provider = ?2, model = ?3, mode = ?4,
-                 temperature = ?5, history_toon = ?6, updated_at = CURRENT_TIMESTAMP WHERE id = ?7",
+                 temperature = ?5, history_toon = ?6, profile_id = ?7, task_id = ?8,
+                 updated_at = CURRENT_TIMESTAMP WHERE id = ?9",
                 params![
                     title,
                     provider,
@@ -180,21 +216,26 @@ impl SessionStore {
                     snapshot.mode,
                     snapshot.temperature,
                     history,
+                    snapshot.profile_id,
+                    snapshot.task_id,
                     id
                 ],
             )?;
             id
         } else {
             self.connection.execute(
-                "INSERT INTO sessions (title, provider, model, mode, temperature, history_toon)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO sessions
+                 (title, provider, model, mode, temperature, history_toon, profile_id, task_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     title,
                     provider,
                     snapshot.model,
                     snapshot.mode,
                     snapshot.temperature,
-                    history
+                    history,
+                    snapshot.profile_id,
+                    snapshot.task_id
                 ],
             )?;
             self.connection.last_insert_rowid()
@@ -236,7 +277,8 @@ impl SessionStore {
 
     pub(crate) fn load(&self, id: i64) -> Result<SavedSession> {
         let row = self.connection.query_row(
-            "SELECT id, title, provider, model, mode, temperature, history_toon
+            "SELECT id, title, provider, model, mode, temperature, history_toon,
+                    profile_id, task_id
              FROM sessions WHERE id = ?1",
             [id],
             |row| {
@@ -248,6 +290,8 @@ impl SessionStore {
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, f64>(5)?,
                     row.get::<_, String>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
                 ))
             },
         )?;
@@ -292,6 +336,8 @@ impl SessionStore {
             .context("повреждена стратегия контекста сессии")?;
         anyhow::ensure!(context_messages <= 1000, "повреждён размер окна сессии");
         let messages = decode_messages_toon(&row.6)?;
+        let profile = row.7.map(|id| self.load_profile(id)).transpose()?;
+        let task = row.8.map(|id| self.load_task(id)).transpose()?;
         anyhow::ensure!(
             summarized_count <= messages.len(),
             "повреждён контекст сессии"
@@ -376,7 +422,135 @@ impl SessionStore {
             checkpoint,
             active_branch,
             branch_pending,
+            profile,
+            task,
         })
+    }
+
+    pub(crate) fn create_profile(&self, name: &str, instructions: &str) -> Result<Profile> {
+        let (name, instructions) = validate_profile(name, instructions)?;
+        self.connection
+            .execute(
+                "INSERT INTO profiles (name, instructions) VALUES (?1, ?2)",
+                params![name, instructions],
+            )
+            .with_context(|| format!("не удалось создать профиль «{name}»"))?;
+        self.load_profile(self.connection.last_insert_rowid())
+    }
+
+    pub(crate) fn list_profiles(&self) -> Result<Vec<Profile>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT id, name, instructions FROM profiles ORDER BY name, id")?;
+        let rows = statement.query_map([], |row| {
+            Ok(Profile {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                instructions: row.get(2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn load_profile(&self, id: i64) -> Result<Profile> {
+        self.connection
+            .query_row(
+                "SELECT id, name, instructions FROM profiles WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok(Profile {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        instructions: row.get(2)?,
+                    })
+                },
+            )
+            .with_context(|| format!("профиль #{id} не найден"))
+    }
+
+    pub(crate) fn create_task(&self, title: &str, todo: &str) -> Result<Task> {
+        let (title, todo) = validate_task(title, todo)?;
+        self.connection.execute(
+            "INSERT INTO tasks (title, todo, phase) VALUES (?1, ?2, 'planning')",
+            params![title, todo],
+        )?;
+        self.load_task(self.connection.last_insert_rowid())
+    }
+
+    pub(crate) fn list_tasks(&self) -> Result<Vec<Task>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, title, todo, phase FROM tasks ORDER BY updated_at DESC, id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (id, title, todo, phase) = row?;
+            Ok(Task {
+                id,
+                title,
+                todo,
+                phase: phase.parse()?,
+            })
+        })
+        .collect()
+    }
+
+    pub(crate) fn load_task(&self, id: i64) -> Result<Task> {
+        let (id, title, todo, phase) = self
+            .connection
+            .query_row(
+                "SELECT id, title, todo, phase FROM tasks WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .with_context(|| format!("задача #{id} не найдена"))?;
+        Ok(Task {
+            id,
+            title,
+            todo,
+            phase: phase.parse()?,
+        })
+    }
+
+    pub(crate) fn update_task_todo(&self, id: i64, todo: &str) -> Result<Task> {
+        let todo = validate_memory_text(todo, "TODO задачи", TASK_TODO_MAX_CHARS)?;
+        let updated = self.connection.execute(
+            "UPDATE tasks SET todo = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+            params![todo, id],
+        )?;
+        anyhow::ensure!(updated == 1, "задача #{id} не найдена");
+        self.load_task(id)
+    }
+
+    pub(crate) fn advance_task(&self, id: i64) -> Result<Task> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let task = self.load_task(id)?;
+        let next = task
+            .phase
+            .next()
+            .with_context(|| format!("задача «{}» уже завершена", task.title))?;
+        let updated = self.connection.execute(
+            "UPDATE tasks SET phase = ?1, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?2 AND phase = ?3",
+            params![next.to_string(), id, task.phase.to_string()],
+        )?;
+        anyhow::ensure!(updated == 1, "фаза задачи изменилась; повторите команду");
+        transaction.commit()?;
+        self.load_task(id)
     }
 
     pub(crate) fn replace_branching_state(
@@ -481,6 +655,15 @@ impl SessionStore {
             .execute("DELETE FROM sessions WHERE id = ?1", [id])?
             > 0)
     }
+}
+
+fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    Ok(columns
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .iter()
+        .any(|name| name == column))
 }
 
 pub(crate) fn provider_id(provider: Provider) -> &'static str {
