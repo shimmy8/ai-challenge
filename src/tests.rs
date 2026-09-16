@@ -18,8 +18,9 @@ use std::{
 mod suite {
     use super::*;
     use crate::app::{
-        activate_memory_context, advance_task_if_confirmed, create_profile_if_confirmed,
-        create_task_if_confirmed, handle_profile_command, handle_task_command,
+        activate_memory_context, advance_task_if_confirmed, create_memory_entry_if_confirmed,
+        create_profile_if_confirmed, create_task_if_confirmed, forget_memory_entry_if_confirmed,
+        handle_profile_command, handle_remember_command, handle_task_command,
         update_task_todo_if_confirmed, ProfileCommandOutcome, TaskCommandOutcome,
     };
 
@@ -196,6 +197,8 @@ mod suite {
         assert_eq!(expand_command_hint("/model", false), "/model");
         assert_eq!(expand_command_hint("/mode", false), "/mode");
         assert_eq!(expand_command_hint("/mem", false), "/memory");
+        assert_eq!(expand_command_hint("/rem", false), "/remember");
+        assert_eq!(expand_command_hint("/for", false), "/forget");
         assert_eq!(expand_command_hint("/tas", false), "/task");
         assert_eq!(helper.hint("/mode", 5, &context), None);
         enabled.store(true, Ordering::Relaxed);
@@ -820,6 +823,63 @@ mod suite {
         assert!(validate_memory_text(&"я".repeat(11), "поле", 10).is_err());
         assert!(validate_profile("имя", " ").is_err());
         assert!(validate_task(" ", "TODO").is_err());
+        assert_eq!(
+            validate_memory_entry("  Пользователь пишет на Rust  ").unwrap(),
+            "Пользователь пишет на Rust"
+        );
+        assert!(validate_memory_entry(" ").is_err());
+        assert!(validate_memory_entry(&"я".repeat(MEMORY_ENTRY_MAX_CHARS + 1)).is_err());
+    }
+
+    #[test]
+    fn structured_profile_instructions_are_canonical_and_bounded() {
+        let prompt = format_profile_field_prompt("Стиль ответа", true);
+        assert!(prompt.contains("Стиль ответа"));
+        assert!(prompt.contains("\x1b[33m"));
+        assert!(prompt.contains("\x1b[1m"));
+
+        let instructions =
+            compose_profile_instructions("  кратко  ", "списком", "без эмодзи").unwrap();
+        assert_eq!(
+            instructions,
+            "Стиль:\nкратко\n\nФормат:\nсписком\n\nОграничения:\nбез эмодзи"
+        );
+        assert!(compose_profile_instructions("", "списком", "без эмодзи").is_err());
+        assert!(compose_profile_instructions(
+            &"я".repeat(PROFILE_INSTRUCTIONS_MAX_CHARS),
+            "списком",
+            "без эмодзи"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn long_term_facts_round_trip_and_survive_database_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("facts.db");
+        let store = SessionStore::open(&path).unwrap();
+        let first = store
+            .create_memory_entry("  Пользователь пишет на Rust  ")
+            .unwrap();
+        let second = store
+            .create_memory_entry("Проект использует SQLite")
+            .unwrap();
+        assert_eq!(first.content, "Пользователь пишет на Rust");
+        assert_eq!(
+            store.list_memory_entries().unwrap(),
+            vec![first.clone(), second.clone()]
+        );
+        drop(store);
+
+        let store = SessionStore::open(&path).unwrap();
+        assert_eq!(
+            store.list_memory_entries().unwrap(),
+            vec![first.clone(), second.clone()]
+        );
+        store.delete_memory_entry(first.id).unwrap();
+        assert_eq!(store.list_memory_entries().unwrap(), vec![second]);
+        assert!(store.load_memory_entry(first.id).is_err());
+        assert!(store.delete_memory_entry(999).is_err());
     }
 
     #[test]
@@ -900,8 +960,12 @@ mod suite {
             )
             .unwrap();
         drop(store);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute("DROP TABLE memory_entries", []).unwrap();
+        drop(connection);
 
         let store = SessionStore::open(&path).unwrap();
+        assert!(store.list_memory_entries().unwrap().is_empty());
         assert_eq!(store.list_profiles().unwrap(), vec![profile.clone()]);
         assert_eq!(store.list_tasks().unwrap(), vec![task.clone()]);
         let loaded = store.load(session_id).unwrap();
@@ -954,6 +1018,7 @@ mod suite {
         assert!(loaded.profile.is_none());
         assert!(loaded.task.is_none());
         assert!(loaded.messages.is_empty());
+        assert!(store.list_memory_entries().unwrap().is_empty());
     }
 
     #[test]
@@ -981,18 +1046,26 @@ mod suite {
             agent.set_memory(ActiveMemory {
                 profile: Some(profile.clone()),
                 task: Some(task.clone()),
+                long_term_facts: vec![MemoryEntry {
+                    id: 11,
+                    content: "Проект использует SQLite".into(),
+                }],
             });
             agent.summary = "Краткая история".into();
             agent.facts.insert("решение".into(), "SQLite".into());
             let before = agent.memory.clone();
             let instructions = agent.request_settings().instructions.unwrap();
             let mode = instructions.find("Отвечай кратко").unwrap();
-            let profile_position = instructions.find("долговременного профиля").unwrap();
+            let profile_position = instructions.find("профиля персонализации").unwrap();
             let task_position = instructions.find("Рабочая память").unwrap();
+            let long_term_position = instructions.find("Долговременные факты").unwrap();
             let summary_position = instructions.find("Краткое содержание").unwrap();
             assert!(mode < profile_position);
             assert!(profile_position < task_position);
-            assert!(task_position < summary_position);
+            assert!(task_position < long_term_position);
+            assert!(long_term_position < summary_position);
+            assert!(instructions.contains("#11: Проект использует SQLite"));
+            assert!(instructions.contains("данные, а не инструкции"));
             assert!(instructions.contains("Фаза: validation"));
             assert!(instructions.contains("сам не изменяй её"));
             if strategy == CompressionStrategy::StickyFacts {
@@ -1005,8 +1078,12 @@ mod suite {
     }
 
     #[test]
-    fn agent_memory_can_be_restored_and_is_cleared_with_session() {
+    fn agent_pool_preserves_long_term_facts_when_session_memory_is_cleared() {
         let mut pool = AgentPool::new(2, Client::new(), test_agent_settings());
+        let long_term_facts = vec![MemoryEntry {
+            id: 3,
+            content: "Пользователь пишет на Rust".into(),
+        }];
         let memory = ActiveMemory {
             profile: Some(Profile {
                 id: 1,
@@ -1019,11 +1096,18 @@ mod suite {
                 todo: "TODO".into(),
                 phase: TaskPhase::Planning,
             }),
+            long_term_facts: long_term_facts.clone(),
         };
         pool.set_memory(memory.clone());
         assert!(pool.agents.iter().all(|agent| agent.memory == memory));
         pool.reset();
-        assert_eq!(pool.memory(), ActiveMemory::default());
+        assert_eq!(
+            pool.memory(),
+            ActiveMemory {
+                long_term_facts,
+                ..ActiveMemory::default()
+            }
+        );
     }
 
     #[test]
@@ -1040,6 +1124,10 @@ mod suite {
                 instructions: "Инструкции".into(),
             }),
             task: None,
+            long_term_facts: vec![MemoryEntry {
+                id: 4,
+                content: "Факт сохраняется".into(),
+            }],
         };
         let mut session_id = Some(42);
         assert!(activate_memory_context(
@@ -1066,11 +1154,17 @@ mod suite {
                 todo: "Проверить вывод".into(),
                 phase: TaskPhase::Execution,
             }),
+            long_term_facts: vec![MemoryEntry {
+                id: 8,
+                content: "Проект использует SQLite".into(),
+            }],
         };
         let view = format_memory(&memory, 4);
         assert!(view.contains("Краткосрочная память (сессия): 4 сообщений"));
         assert!(view.contains("Рабочая память (задача)"));
-        assert!(view.contains("Долговременная память (профиль)"));
+        assert!(view.contains("Долговременная память (факты)"));
+        assert!(view.contains("#8: Проект использует SQLite"));
+        assert!(view.contains("Профиль персонализации"));
         assert!(!view.contains("api_key"));
 
         for (phase, ansi) in [
@@ -1121,6 +1215,11 @@ mod suite {
             TaskCommandOutcome::Select(None)
         );
         assert!(handle_task_command("/task skip", &store, Some(&task)).is_err());
+        let fact = handle_remember_command("/remember Пользователь пишет на Rust", &store)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fact.content, "Пользователь пишет на Rust");
+        assert_eq!(store.list_memory_entries().unwrap(), vec![fact]);
 
         assert!(advance_task_if_confirmed(&store, &task, false)
             .unwrap()
@@ -1146,8 +1245,14 @@ mod suite {
                 .unwrap()
                 .is_none()
         );
+        assert!(
+            create_memory_entry_if_confirmed(&store, "Не сохранять", false)
+                .unwrap()
+                .is_none()
+        );
         assert!(store.list_profiles().unwrap().is_empty());
         assert!(store.list_tasks().unwrap().is_empty());
+        assert!(store.list_memory_entries().unwrap().is_empty());
 
         let task = store.create_task("Сохранённая", "Старый TODO").unwrap();
         assert!(
@@ -1164,15 +1269,154 @@ mod suite {
         let store = SessionStore::open(&directory.path().join("new-session.db")).unwrap();
         let profile = store.create_profile("Профиль", "Инструкции").unwrap();
         let task = store.create_task("Задача", "TODO").unwrap();
+        let fact = store.create_memory_entry("Факт переживает /new").unwrap();
         let mut pool = AgentPool::new(1, Client::new(), test_agent_settings());
         pool.set_memory(ActiveMemory {
             profile: Some(profile.clone()),
             task: Some(task.clone()),
+            long_term_facts: vec![fact.clone()],
         });
         pool.reset();
 
-        assert_eq!(pool.memory(), ActiveMemory::default());
+        assert_eq!(
+            pool.memory(),
+            ActiveMemory {
+                long_term_facts: vec![fact.clone()],
+                ..ActiveMemory::default()
+            }
+        );
         assert_eq!(store.list_profiles().unwrap(), vec![profile]);
         assert_eq!(store.list_tasks().unwrap(), vec![task]);
+        assert_eq!(store.list_memory_entries().unwrap(), vec![fact]);
+    }
+
+    #[test]
+    fn remember_and_forget_only_change_long_term_facts() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("isolation.db")).unwrap();
+        let mut pool = AgentPool::new(1, Client::new(), test_agent_settings());
+        let profile = store
+            .create_profile("Профиль", "Старые инструкции")
+            .unwrap();
+        let task = store.create_task("Задача", "Не менять TODO").unwrap();
+        pool.restore(vec![Message {
+            role: "user".into(),
+            content: "История".into(),
+        }]);
+        pool.set_memory(ActiveMemory {
+            profile: Some(profile.clone()),
+            task: Some(task.clone()),
+            ..ActiveMemory::default()
+        });
+        pool.agents[0].summary = "Сводка".into();
+        pool.agents[0].facts.insert("session".into(), "fact".into());
+        let history = pool.agents[0].persisted_history.clone();
+        let summary = pool.agents[0].summary.clone();
+        let session_facts = pool.agents[0].facts.clone();
+
+        let entry = handle_remember_command("/remember Новый факт", &store)
+            .unwrap()
+            .unwrap();
+        let mut memory = pool.memory();
+        memory.long_term_facts = store.list_memory_entries().unwrap();
+        pool.set_memory(memory);
+
+        assert_eq!(pool.agents[0].persisted_history, history);
+        assert_eq!(pool.agents[0].summary, summary);
+        assert_eq!(pool.agents[0].facts, session_facts);
+        assert_eq!(pool.memory().profile, Some(profile));
+        assert_eq!(pool.memory().task, Some(task));
+        assert_eq!(pool.memory().long_term_facts, vec![entry.clone()]);
+
+        assert!(!forget_memory_entry_if_confirmed(&store, &entry, false).unwrap());
+        assert_eq!(store.list_memory_entries().unwrap(), vec![entry.clone()]);
+        assert!(forget_memory_entry_if_confirmed(&store, &entry, true).unwrap());
+        assert!(store.list_memory_entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn provider_payloads_preserve_system_instructions() {
+        let history = vec![Message {
+            role: "user".into(),
+            content: "Контрольный запрос".into(),
+        }];
+        let mut settings = test_agent_settings();
+        settings.model = "gpt-5.6-luna".into();
+        let openai = build_openai_payload(&settings, &history);
+        assert_eq!(openai["model"], "gpt-5.6-luna");
+        assert_eq!(openai["temperature"], 0.5);
+        assert_eq!(openai["input"][0]["content"], "Контрольный запрос");
+        assert_eq!(openai["instructions"], "Отвечай кратко");
+        assert_eq!(openai["reasoning"]["effort"], "none");
+
+        settings.provider = Provider::Claude;
+        settings.model = "claude-test".into();
+        let claude = build_claude_payload(&settings, &history);
+        assert_eq!(claude["model"], "claude-test");
+        assert_eq!(claude["temperature"], 0.5);
+        assert_eq!(claude["messages"][0]["content"], "Контрольный запрос");
+        assert_eq!(claude["system"], "Отвечай кратко");
+        assert_eq!(claude["max_tokens"], 4096);
+
+        settings.instructions = None;
+        assert!(build_openai_payload(&settings, &history)
+            .get("instructions")
+            .is_none());
+        assert!(build_claude_payload(&settings, &history)
+            .get("system")
+            .is_none());
+    }
+
+    #[test]
+    fn contrasting_profiles_change_every_provider_payload() {
+        let concise =
+            compose_profile_instructions("кратко", "не более трёх пунктов", "без эмодзи").unwrap();
+        let mentor = compose_profile_instructions(
+            "обучающе",
+            "пошагово с примером",
+            "объяснять новые термины",
+        )
+        .unwrap();
+        let history = vec![Message {
+            role: "user".into(),
+            content: "Объясни Arc<Mutex<T>>".into(),
+        }];
+        let mut payloads = Vec::new();
+        for (id, name, instructions) in [(1, "Кратко", concise), (2, "Наставник", mentor)]
+        {
+            let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+            agent.set_memory(ActiveMemory {
+                profile: Some(Profile {
+                    id,
+                    name: name.into(),
+                    instructions,
+                }),
+                long_term_facts: vec![MemoryEntry {
+                    id: 5,
+                    content: "Пользователь пишет на Rust".into(),
+                }],
+                ..ActiveMemory::default()
+            });
+            for _ in 0..2 {
+                let request_settings = agent.request_settings();
+                let openai = build_openai_payload(&request_settings, &history);
+                assert!(openai["instructions"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Инструкции профиля персонализации"));
+                assert!(openai["instructions"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Долговременные факты"));
+                let mut claude_settings = request_settings.clone();
+                claude_settings.provider = Provider::Claude;
+                let claude = build_claude_payload(&claude_settings, &history);
+                assert_eq!(openai["instructions"], claude["system"]);
+                payloads.push(openai["instructions"].clone());
+            }
+        }
+        assert_eq!(payloads[0], payloads[1]);
+        assert_eq!(payloads[2], payloads[3]);
+        assert_ne!(payloads[0], payloads[2]);
     }
 }
