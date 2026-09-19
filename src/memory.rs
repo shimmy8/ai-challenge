@@ -4,6 +4,8 @@ use std::{fmt, str::FromStr};
 
 pub(crate) const MEMORY_NAME_MAX_CHARS: usize = 80;
 pub(crate) const MEMORY_ENTRY_MAX_CHARS: usize = 1000;
+pub(crate) const INVARIANT_MAX_CHARS: usize = 1000;
+pub(crate) const INVARIANTS_MAX: usize = 64;
 pub(crate) const PROFILE_INSTRUCTIONS_MAX_CHARS: usize = 2000;
 pub(crate) const TASK_TITLE_MAX_CHARS: usize = 120;
 pub(crate) const TASK_TODO_MAX_CHARS: usize = 2000;
@@ -24,6 +26,23 @@ pub(crate) struct Profile {
 pub(crate) struct MemoryEntry {
     pub(crate) id: i64,
     pub(crate) content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Invariant {
+    pub(crate) id: i64,
+    pub(crate) content: String,
+    pub(crate) enabled: bool,
+}
+
+pub(crate) fn validate_invariant(content: &str) -> Result<String> {
+    let content = content.trim();
+    anyhow::ensure!(!content.is_empty(), "инвариант не может быть пустым");
+    anyhow::ensure!(
+        content.chars().count() <= INVARIANT_MAX_CHARS,
+        "инвариант длиннее {INVARIANT_MAX_CHARS} символов"
+    );
+    Ok(content.to_owned())
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -58,6 +58,7 @@ pub(crate) async fn run() -> Result<()> {
         client.clone(),
         AgentSettings::from_config(&config, provider, initial_mode)?,
     );
+    agents.set_invariants(sessions.list_invariants()?);
     agents.set_memory(ActiveMemory {
         long_term_facts: sessions.list_memory_entries()?,
         ..ActiveMemory::default()
@@ -421,6 +422,14 @@ pub(crate) async fn run() -> Result<()> {
                 }
                 continue;
             }
+            command if command == "/invariant" || command.starts_with("/invariant ") => {
+                match handle_invariant_command(command, &sessions) {
+                    Ok(true) => agents.set_invariants(sessions.list_invariants()?),
+                    Ok(false) => {}
+                    Err(error) => eprintln!("{} {error:#}", style("Ошибка инварианта:").red()),
+                }
+                continue;
+            }
             command if command == "/forget" || command.starts_with("/forget ") => {
                 if handle_forget_command(command, &sessions)? {
                     let mut memory = agents.memory();
@@ -553,33 +562,34 @@ pub(crate) async fn run() -> Result<()> {
                 );
             }
             for run in results {
+                if let Some(path) = &metrics_log_path {
+                    let entry = MetricsLogEntry {
+                        timestamp_unix_ms: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis(),
+                        session_id: active_session_id,
+                        outcome: if run.result.is_ok() {
+                            "success"
+                        } else {
+                            "failed"
+                        },
+                        branch: &agents.agents[0].active_branch,
+                        agent_id: run.agent_id,
+                        provider,
+                        model: config.model(provider)?,
+                        elapsed_ms: run.elapsed.as_millis(),
+                        request_input_tokens: run.input_tokens,
+                        request_output_tokens: run.output_tokens,
+                        session_input_tokens: run.session_input_tokens,
+                        session_output_tokens: run.session_output_tokens,
+                    };
+                    if let Err(error) = append_metrics_log(path, &entry) {
+                        eprintln!("{} {error:#}", style("Не удалось записать метрики:").red());
+                    }
+                }
                 match run.result {
                     Ok(answer) => {
-                        if let Some(path) = &metrics_log_path {
-                            let entry = MetricsLogEntry {
-                                timestamp_unix_ms: SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_millis(),
-                                session_id: active_session_id
-                                    .context("успешный ответ не привязан к сессии")?,
-                                branch: &agents.agents[0].active_branch,
-                                agent_id: run.agent_id,
-                                provider,
-                                model: config.model(provider)?,
-                                elapsed_ms: run.elapsed.as_millis(),
-                                request_input_tokens: answer.input_tokens,
-                                request_output_tokens: answer.output_tokens,
-                                session_input_tokens: answer.session_input_tokens,
-                                session_output_tokens: answer.session_output_tokens,
-                            };
-                            if let Err(error) = append_metrics_log(path, &entry) {
-                                eprintln!(
-                                    "{} {error:#}",
-                                    style("Не удалось записать метрики:").red()
-                                );
-                            }
-                        }
                         println!(
                             "{} {}\n{}\n",
                             style("✓").green().bold(),
@@ -847,6 +857,188 @@ pub(crate) fn handle_remember_command(
         .default(true)
         .interact()?;
     create_memory_entry_if_confirmed(store, &content, confirmed)
+}
+
+pub(crate) fn handle_invariant_command(command: &str, store: &SessionStore) -> Result<bool> {
+    let arguments = command
+        .strip_prefix("/invariant")
+        .unwrap_or_default()
+        .trim();
+    let (action, value) = arguments.split_once(' ').unwrap_or((arguments, ""));
+    match action {
+        "" => choose_invariant_action(store),
+        "list" if value.trim().is_empty() => {
+            let rules = store.list_invariants()?;
+            if rules.is_empty() {
+                println!("{}", style("Глобальных инвариантов пока нет.").dim());
+            } else {
+                for rule in rules {
+                    println!(
+                        "#{} · {}: {}",
+                        rule.id,
+                        if rule.enabled {
+                            "включён"
+                        } else {
+                            "выключен"
+                        },
+                        rule.content
+                    );
+                }
+            }
+            Ok(false)
+        }
+        "add" => {
+            let rule = if value.trim().is_empty() {
+                let content: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Текст инварианта")
+                    .validate_with(|text: &String| {
+                        validate_invariant(text)
+                            .map(|_| ())
+                            .map_err(|error| error.to_string())
+                    })
+                    .interact_text()?;
+                let confirmed = Confirm::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Сохранить инвариант?")
+                    .default(true)
+                    .interact()?;
+                if !confirmed {
+                    println!("{}", style("Добавление инварианта отменено.").dim());
+                    return Ok(false);
+                }
+                store.create_invariant(&content)?
+            } else {
+                store.create_invariant(value)?
+            };
+            println!(
+                "{} #{}: {}",
+                style("Инвариант сохранён.").yellow(),
+                rule.id,
+                rule.content
+            );
+            Ok(true)
+        }
+        "enable" | "disable" => {
+            let id = value
+                .trim()
+                .parse::<i64>()
+                .with_context(|| format!("используйте /invariant {action} <id>"))?;
+            let rule = store.set_invariant_enabled(id, action == "enable")?;
+            println!(
+                "{} #{}: {}",
+                style(if rule.enabled {
+                    "Инвариант включён."
+                } else {
+                    "Инвариант выключен."
+                })
+                .yellow(),
+                rule.id,
+                rule.content
+            );
+            Ok(true)
+        }
+        "remove" => {
+            let id = value
+                .trim()
+                .parse::<i64>()
+                .context("используйте /invariant remove <id>")?;
+            let rule = store.load_invariant(id)?;
+            let confirmed = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!("Удалить инвариант #{}: {}?", rule.id, rule.content))
+                .default(false)
+                .interact()?;
+            if !remove_invariant_if_confirmed(store, id, confirmed)? {
+                println!("{}", style("Удаление инварианта отменено.").dim());
+                return Ok(false);
+            }
+            println!("{}", style("Инвариант удалён.").yellow());
+            Ok(true)
+        }
+        _ => {
+            bail!("используйте /invariant, /invariant add <текст>, /invariant list, /invariant enable <id>, /invariant disable <id> или /invariant remove <id>")
+        }
+    }
+}
+
+fn choose_invariant_action(store: &SessionStore) -> Result<bool> {
+    let actions = [
+        "Просмотреть инварианты",
+        "Добавить инвариант",
+        "Включить инвариант",
+        "Выключить инвариант",
+        "Удалить инвариант",
+    ];
+    let Some(action) = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Глобальные инварианты")
+        .items(&actions)
+        .default(0)
+        .interact_opt()?
+    else {
+        return Ok(false);
+    };
+    match action {
+        0 => handle_invariant_command("/invariant list", store),
+        1 => handle_invariant_command("/invariant add", store),
+        2..=4 => {
+            let rules = store.list_invariants()?;
+            let candidates = rules
+                .into_iter()
+                .filter(|rule| match action {
+                    2 => !rule.enabled,
+                    3 => rule.enabled,
+                    _ => true,
+                })
+                .collect::<Vec<_>>();
+            if candidates.is_empty() {
+                println!("{}", style("Подходящих инвариантов нет.").dim());
+                return Ok(false);
+            }
+            let names = candidates
+                .iter()
+                .map(|rule| {
+                    format!(
+                        "#{} · {} · {}",
+                        rule.id,
+                        if rule.enabled {
+                            "включён"
+                        } else {
+                            "выключен"
+                        },
+                        rule.content
+                    )
+                })
+                .collect::<Vec<_>>();
+            let Some(selected) = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt("Выберите инвариант")
+                .items(&names)
+                .default(0)
+                .interact_opt()?
+            else {
+                return Ok(false);
+            };
+            let command = match action {
+                2 => "enable",
+                3 => "disable",
+                _ => "remove",
+            };
+            handle_invariant_command(
+                &format!("/invariant {command} {}", candidates[selected].id),
+                store,
+            )
+        }
+        _ => unreachable!(),
+    }
+}
+
+pub(crate) fn remove_invariant_if_confirmed(
+    store: &SessionStore,
+    id: i64,
+    confirmed: bool,
+) -> Result<bool> {
+    if !confirmed {
+        return Ok(false);
+    }
+    store.delete_invariant(id)?;
+    Ok(true)
 }
 
 pub(crate) fn create_memory_entry_if_confirmed(

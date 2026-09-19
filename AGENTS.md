@@ -56,3 +56,14 @@
 ## Требования к коммитам и Pull Request
 
 В истории используются короткие тематические заголовки, например `day10: добавить стратегии управления контекстом` и `week 1, day 1: add interactive multi-provider LLM CLI`. Следуйте этому шаблону: один логически завершённый набор изменений на коммит, краткий заголовок в повелительной форме и при необходимости префикс дня или области. В Pull Request опишите видимое пользователю изменение, перечислите команды проверки и добавьте ссылку на связанную задачу или день испытания. Если меняется взаимодействие с CLI, приложите вывод терминала или снимки экрана. Никогда не добавляйте API-ключи, базы данных сессий или содержимое личных диалогов.
+
+<!-- CODEGRAPH_START -->
+## CodeGraph
+
+In repositories indexed by CodeGraph (a `.codegraph/` directory exists at the repo root), reach for it BEFORE grep/find or reading files when you need to understand or locate code:
+
+- **MCP tool** (when available): `codegraph_explore` answers most code questions in one call — the relevant symbols' verbatim source plus the call paths between them, including dynamic-dispatch hops grep can't follow. Name a file or symbol in the query to read its current line-numbered source. If it's listed but deferred, load it by name via tool search.
+- **Shell** (always works): `codegraph explore "<symbol names or question>"` prints the same output.
+
+If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is the user's decision.
+<!-- CODEGRAPH_END -->
