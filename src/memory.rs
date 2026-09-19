@@ -259,16 +259,45 @@ pub(crate) fn extract_task_update(
 ) -> (String, Option<std::result::Result<TaskUpdate, String>>) {
     let trimmed = text.trim_end();
     let (body, last_line) = trimmed.rsplit_once('\n').unwrap_or(("", trimmed));
-    let json = last_line
-        .strip_prefix(TASK_UPDATE_PREFIX)
-        .or_else(|| last_line.strip_prefix("TASK_UPDATE ").map(str::trim_start))
-        .or_else(|| is_bare_task_update(last_line).then_some(last_line));
-    let Some(json) = json else {
+    let marker = [TASK_UPDATE_PREFIX, "TASK_UPDATE "]
+        .into_iter()
+        .filter_map(|prefix| last_line.rfind(prefix).map(|start| (start, prefix)))
+        .filter(|(start, _)| {
+            last_line[..*start]
+                .chars()
+                .last()
+                .is_none_or(char::is_whitespace)
+        })
+        .max_by_key(|(start, _)| *start);
+    let (visible_last_line, json) = if let Some((start, prefix)) = marker {
+        (
+            &last_line[..start],
+            last_line[start + prefix.len()..].trim_start(),
+        )
+    } else if is_bare_task_update(last_line) {
+        ("", last_line)
+    } else {
         return (text.to_owned(), None);
     };
-    let update = serde_json::from_str::<TaskUpdate>(json)
-        .map_err(|error| format!("некорректный TASK_UPDATE: {error}"));
-    (body.trim_end().to_owned(), Some(update))
+    let update = serde_json::from_str::<TaskUpdate>(json).map_err(|error| {
+        let fragment: String = json.chars().take(120).collect();
+        let suffix = if json.chars().count() > 120 {
+            "…"
+        } else {
+            ""
+        };
+        format!(
+            "некорректный TASK_UPDATE: {error}; получено: {fragment:?}{suffix}; TODO не изменён"
+        )
+    });
+    let visible = if body.is_empty() {
+        visible_last_line.trim_end().to_owned()
+    } else if visible_last_line.trim().is_empty() {
+        body.trim_end().to_owned()
+    } else {
+        format!("{}\n{}", body.trim_end(), visible_last_line.trim_end())
+    };
+    (visible, Some(update))
 }
 
 fn is_bare_task_update(line: &str) -> bool {
@@ -544,6 +573,8 @@ pub(crate) struct Task {
     pub(crate) title: String,
     pub(crate) todo: TaskTodo,
     pub(crate) phase: TaskPhase,
+    pub(crate) plan_version: i64,
+    pub(crate) approved_plan_version: Option<i64>,
     pub(crate) results: Vec<TaskStepResult>,
 }
 
@@ -615,14 +646,45 @@ pub(crate) fn task_result_summary(update: &TaskUpdate, answer: &str) -> String {
 
 impl Task {
     pub(crate) fn ready_for_next(&self) -> bool {
+        self.next_phase_if_ready().is_ok()
+    }
+
+    pub(crate) fn next_phase_if_ready(&self) -> Result<TaskPhase> {
+        let next = self
+            .phase
+            .next()
+            .with_context(|| format!("задача «{}» уже завершена", self.title))?;
         match self.phase {
             TaskPhase::Planning => {
-                !self.todo.execution.is_empty() && !self.todo.validation.is_empty()
+                anyhow::ensure!(
+                    !self.todo.execution.is_empty(),
+                    "план не содержит пунктов выполнения"
+                );
+                anyhow::ensure!(
+                    !self.todo.validation.is_empty(),
+                    "план не содержит пунктов проверки"
+                );
             }
-            TaskPhase::Execution => self.todo.pending_for(self.phase) == 0,
-            TaskPhase::Validation => self.todo.pending_for(self.phase) == 0,
-            TaskPhase::Done => false,
+            TaskPhase::Execution | TaskPhase::Validation => {
+                anyhow::ensure!(
+                    self.approved_plan_version == Some(self.plan_version),
+                    "текущая версия плана не утверждена"
+                );
+                let (items, label) = if self.phase == TaskPhase::Execution {
+                    (&self.todo.execution, "выполнения")
+                } else {
+                    (&self.todo.validation, "проверки")
+                };
+                anyhow::ensure!(!items.is_empty(), "нет пунктов {label}");
+                let pending = self.todo.pending_for(self.phase);
+                anyhow::ensure!(
+                    pending == 0,
+                    "осталось незавершённых пунктов {label}: {pending}"
+                );
+            }
+            TaskPhase::Done => unreachable!(),
         }
+        Ok(next)
     }
 }
 

@@ -369,40 +369,50 @@ pub(crate) async fn run() -> Result<()> {
             }
             command if command == "/task" || command.starts_with("/task ") => {
                 let current = agents.memory();
-                let automatic_instruction =
-                    match handle_task_command(command, &sessions, current.task.as_ref())? {
-                        TaskCommandOutcome::Unchanged => None,
-                        TaskCommandOutcome::Select(task) => {
-                            if current.task.as_ref().map(|value| value.id)
-                                != task.as_ref().map(|value| value.id)
-                            {
-                                let mut memory = current;
-                                memory.task = task;
-                                let started = activate_memory_context(
-                                    &mut agents,
-                                    &mut active_session_id,
-                                    memory,
-                                );
-                                println!(
-                                    "{}{}",
-                                    style("Активная задача обновлена.").yellow(),
-                                    if started {
-                                        format!(" {}", style("Начата новая сессия.").dim())
-                                    } else {
-                                        String::new()
-                                    }
-                                );
-                            }
-                            None
-                        }
-                        TaskCommandOutcome::Refresh(task) => {
-                            let phase = task.phase;
+                let outcome = match handle_task_command(command, &sessions, current.task.as_ref()) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!("{} {error:#}", style("Команда задачи не выполнена:").red());
+                        continue;
+                    }
+                };
+                let automatic_instruction = match outcome {
+                    TaskCommandOutcome::Unchanged => None,
+                    TaskCommandOutcome::Select(task) => {
+                        if current.task.as_ref().map(|value| value.id)
+                            != task.as_ref().map(|value| value.id)
+                        {
                             let mut memory = current;
-                            memory.task = Some(task);
+                            memory.task = task;
+                            let started = activate_memory_context(
+                                &mut agents,
+                                &mut active_session_id,
+                                memory,
+                            );
+                            println!(
+                                "{}{}",
+                                style("Активная задача обновлена.").yellow(),
+                                if started {
+                                    format!(" {}", style("Начата новая сессия.").dim())
+                                } else {
+                                    String::new()
+                                }
+                            );
+                        } else if current.task.as_ref() != task.as_ref() {
+                            let mut memory = current;
+                            memory.task = task;
                             agents.set_memory(memory);
-                            task_phase_start_instruction(phase)
                         }
-                    };
+                        None
+                    }
+                    TaskCommandOutcome::Refresh(task) => {
+                        let phase = task.phase;
+                        let mut memory = current;
+                        memory.task = Some(task);
+                        agents.set_memory(memory);
+                        task_phase_start_instruction(phase)
+                    }
+                };
                 let Some(instruction) = automatic_instruction else {
                     continue;
                 };
@@ -1117,15 +1127,22 @@ pub(crate) fn handle_task_command(
     match action {
         "show" => {
             match current {
-                Some(task) => println!(
-                    "{} #{} «{}»\nФаза: {}\n{}\n{}",
-                    style("Активная задача:").yellow(),
-                    task.id,
-                    task.title,
-                    task.phase,
-                    format_task_todo(&task.todo),
-                    format_task_results(task, true)
-                ),
+                Some(selected) => {
+                    let task = store.load_task(selected.id)?;
+                    println!(
+                        "{} #{} «{}»\nФаза: {}\nВерсия плана: {}\nУтверждена версия: {}\n{}\n{}",
+                        style("Активная задача:").yellow(),
+                        task.id,
+                        task.title,
+                        task.phase,
+                        task.plan_version,
+                        task.approved_plan_version
+                            .map_or_else(|| "нет".to_owned(), |v| v.to_string()),
+                        format_task_todo(&task.todo),
+                        format_task_results(&task, true)
+                    );
+                    return Ok(TaskCommandOutcome::Select(Some(task)));
+                }
                 None => println!("{}", style("Задача не выбрана.").dim()),
             }
             Ok(TaskCommandOutcome::Unchanged)
@@ -1137,16 +1154,14 @@ pub(crate) fn handle_task_command(
         )?))),
         "new" => create_task_interactive(store),
         "next" => {
-            let task = current.context("сначала выберите задачу через /task")?;
-            let next = task
-                .phase
-                .next()
-                .with_context(|| format!("задача «{}» уже завершена", task.title))?;
+            let selected = current.context("сначала выберите задачу через /task")?;
+            let task = store.load_task(selected.id)?;
+            let next = task.next_phase_if_ready()?;
             let confirmed = Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt(task_transition_prompt(task, next))
+                .with_prompt(task_transition_prompt(&task, next))
                 .default(false)
                 .interact()?;
-            let Some(task) = advance_task_if_confirmed(store, task, confirmed)? else {
+            let Some(task) = advance_task_if_confirmed(store, &task, confirmed)? else {
                 println!("{}", style("Фаза задачи не изменена.").dim());
                 return Ok(TaskCommandOutcome::Unchanged);
             };
@@ -1163,12 +1178,20 @@ pub(crate) fn handle_task_command(
 }
 
 pub(crate) fn task_transition_prompt(task: &Task, next: TaskPhase) -> String {
-    format!(
+    let mut prompt = format!(
         "Перейти {} -> {}? Незавершённых пунктов текущего этапа: {}",
         task.phase,
         next,
         task.todo.pending_for(task.phase)
-    )
+    );
+    if task.phase == TaskPhase::Planning {
+        prompt.push_str(&format!(
+            "\nУтвердить версию плана {}:\n{}",
+            task.plan_version,
+            format_task_todo(&task.todo)
+        ));
+    }
+    prompt
 }
 
 pub(crate) fn task_phase_start_instruction(phase: TaskPhase) -> Option<&'static str> {
@@ -1189,7 +1212,9 @@ pub(crate) fn advance_task_if_confirmed(
     confirmed: bool,
 ) -> Result<Option<Task>> {
     if confirmed {
-        store.advance_task(task.id).map(Some)
+        store
+            .advance_task(task.id, task.phase, task.plan_version)
+            .map(Some)
     } else {
         Ok(None)
     }

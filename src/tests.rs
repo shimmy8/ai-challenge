@@ -878,6 +878,227 @@ mod suite {
     }
 
     #[test]
+    fn task_plan_version_changes_only_for_saved_planning_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("versions.db")).unwrap();
+        let task = store.create_task("Версии", "Исходный факт").unwrap();
+        assert_eq!(task.plan_version, 0);
+        assert_eq!(task.approved_plan_version, None);
+        let plan = TaskUpdate {
+            e: vec!["Сделать".into()],
+            v: vec!["Проверить".into()],
+            ..TaskUpdate::default()
+        };
+        let task = store
+            .save_task_update(task.id, TaskPhase::Planning, &plan)
+            .unwrap();
+        assert_eq!(task.plan_version, 1);
+        let repeated = store
+            .save_task_update(task.id, TaskPhase::Planning, &plan)
+            .unwrap();
+        assert_eq!(repeated.plan_version, 1);
+        let empty = store
+            .save_task_update(task.id, TaskPhase::Planning, &TaskUpdate::default())
+            .unwrap();
+        assert_eq!(empty.plan_version, 1);
+        assert!(store
+            .save_task_update(
+                task.id,
+                TaskPhase::Planning,
+                &TaskUpdate {
+                    ed: vec![1],
+                    ..TaskUpdate::default()
+                }
+            )
+            .is_err());
+        assert_eq!(store.load_task(task.id).unwrap(), empty);
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER block_plan_update BEFORE UPDATE ON tasks
+                 BEGIN SELECT RAISE(ABORT, 'blocked'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .save_task_update(
+                task.id,
+                TaskPhase::Planning,
+                &TaskUpdate {
+                    f: vec!["Новый факт".into()],
+                    ..TaskUpdate::default()
+                }
+            )
+            .is_err());
+        assert_eq!(store.load_task(task.id).unwrap(), empty);
+        store
+            .connection
+            .execute_batch("DROP TRIGGER block_plan_update;")
+            .unwrap();
+        let updated = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Planning,
+                &TaskUpdate {
+                    f: vec!["Новый факт".into()],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.plan_version, 2);
+        assert_eq!(updated.approved_plan_version, None);
+    }
+
+    #[test]
+    fn task_transition_requires_ready_current_and_approved_plan() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("transitions.db")).unwrap();
+        let initial = store.create_task("Переходы", "Контекст").unwrap();
+        assert!(store
+            .advance_task(initial.id, initial.phase, initial.plan_version)
+            .unwrap_err()
+            .to_string()
+            .contains("пунктов выполнения"));
+        assert!(handle_task_command("/task next", &store, Some(&initial)).is_err());
+        assert_eq!(store.load_task(initial.id).unwrap(), initial);
+
+        let plan = store
+            .save_task_update(
+                initial.id,
+                TaskPhase::Planning,
+                &TaskUpdate {
+                    e: vec!["Сделать".into()],
+                    v: vec!["Проверить".into()],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.set_memory(ActiveMemory {
+            task: Some(plan.clone()),
+            ..ActiveMemory::default()
+        });
+        let planning_prompt = agent.request_settings().instructions.unwrap();
+        assert!(planning_prompt.contains("Фаза: planning\nВерсия плана: 1\nУтверждена версия: нет"));
+        assert!(planning_prompt.contains("не выполняй их"));
+        assert!(task_transition_prompt(&plan, TaskPhase::Execution)
+            .contains("Утвердить версию плана 1"));
+        assert!(task_transition_prompt(&plan, TaskPhase::Execution).contains("Сделать"));
+        assert!(store
+            .advance_task(plan.id, plan.phase, initial.plan_version)
+            .is_err());
+        assert_eq!(store.load_task(plan.id).unwrap(), plan);
+        assert!(advance_task_if_confirmed(&store, &plan, false)
+            .unwrap()
+            .is_none());
+        assert_eq!(store.load_task(plan.id).unwrap(), plan);
+
+        let newer = store
+            .save_task_update(
+                plan.id,
+                TaskPhase::Planning,
+                &TaskUpdate {
+                    f: vec!["Уточнение".into()],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            handle_task_command("/task show", &store, Some(&plan)).unwrap(),
+            TaskCommandOutcome::Select(Some(newer.clone()))
+        );
+        assert!(advance_task_if_confirmed(&store, &plan, true).is_err());
+        assert_eq!(store.load_task(plan.id).unwrap(), newer);
+        let execution = advance_task_if_confirmed(&store, &newer, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(execution.phase, TaskPhase::Execution);
+        assert_eq!(execution.approved_plan_version, Some(2));
+        agent.set_memory(ActiveMemory {
+            task: Some(execution.clone()),
+            ..ActiveMemory::default()
+        });
+        let execution_prompt = agent.request_settings().instructions.unwrap();
+        assert!(execution_prompt.contains("Фаза: execution\nВерсия плана: 2\nУтверждена версия: 2"));
+        assert!(execution_prompt.contains("Текущий шаг: e#1"));
+        assert!(store
+            .advance_task(execution.id, execution.phase, execution.plan_version)
+            .unwrap_err()
+            .to_string()
+            .contains("незавершённых пунктов выполнения"));
+        let completed_execution = store
+            .save_task_update(
+                execution.id,
+                TaskPhase::Execution,
+                &TaskUpdate {
+                    ed: vec![1],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(completed_execution.plan_version, 2);
+        let validation = store
+            .advance_task(
+                completed_execution.id,
+                completed_execution.phase,
+                completed_execution.plan_version,
+            )
+            .unwrap();
+        assert_eq!(validation.phase, TaskPhase::Validation);
+        assert_eq!(validation.approved_plan_version, Some(2));
+        agent.set_memory(ActiveMemory {
+            task: Some(validation.clone()),
+            ..ActiveMemory::default()
+        });
+        let validation_prompt = agent.request_settings().instructions.unwrap();
+        assert!(
+            validation_prompt.contains("Фаза: validation\nВерсия плана: 2\nУтверждена версия: 2")
+        );
+        assert!(validation_prompt.contains("Текущий шаг: v#1"));
+        assert!(store
+            .advance_task(validation.id, validation.phase, validation.plan_version)
+            .unwrap_err()
+            .to_string()
+            .contains("незавершённых пунктов проверки"));
+        let checked = store
+            .save_task_update(
+                validation.id,
+                TaskPhase::Validation,
+                &TaskUpdate {
+                    vd: vec![1],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        let done = store
+            .advance_task(checked.id, checked.phase, checked.plan_version)
+            .unwrap();
+        assert_eq!(done.phase, TaskPhase::Done);
+        assert!(store
+            .advance_task(done.id, done.phase, done.plan_version)
+            .is_err());
+    }
+
+    #[test]
+    fn task_transition_rejects_empty_work_sections() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("empty-sections.db")).unwrap();
+        let mut task = store.create_task("Пустые секции", "Контекст").unwrap();
+        task.phase = TaskPhase::Execution;
+        task.approved_plan_version = Some(task.plan_version);
+        assert!(task
+            .next_phase_if_ready()
+            .unwrap_err()
+            .to_string()
+            .contains("нет пунктов выполнения"));
+        task.phase = TaskPhase::Validation;
+        assert!(task
+            .next_phase_if_ready()
+            .unwrap_err()
+            .to_string()
+            .contains("нет пунктов проверки"));
+    }
+
+    #[test]
     fn structured_task_todo_allocates_ids_deduplicates_and_counts_pending_items() {
         let mut todo = TaskTodo::from_description("  Важный   контекст  ").unwrap();
         assert!(!todo.add_fact("Важный контекст").unwrap());
@@ -900,6 +1121,8 @@ mod suite {
             title: "Переход".into(),
             todo: todo.clone(),
             phase: TaskPhase::Execution,
+            plan_version: 1,
+            approved_plan_version: Some(1),
             results: Vec::new(),
         };
         assert!(task_transition_prompt(&task, TaskPhase::Validation)
@@ -1009,6 +1232,22 @@ mod suite {
     }
 
     #[test]
+    fn task_update_after_prose_on_last_line_is_extracted() {
+        let (text, update) = extract_task_update(
+            "Схема получена. Пункт завершён. TASK_UPDATE:{\"ed\":[1],\"s\":\"Схема orders\"}",
+        );
+        assert_eq!(text, "Схема получена. Пункт завершён.");
+        let update = update.unwrap().unwrap();
+        assert_eq!(update.ed, vec![1]);
+        assert_eq!(update.s.as_deref(), Some("Схема orders"));
+
+        let (text, update) =
+            extract_task_update("Первая строка\nПункт уже завершён. TASK_UPDATE:{}");
+        assert_eq!(text, "Первая строка\nПункт уже завершён.");
+        assert!(update.unwrap().unwrap().ed.is_empty());
+    }
+
+    #[test]
     fn task_updates_are_atomic_and_phase_restricted() {
         let todo = TaskTodo::from_description("Контекст").unwrap();
         assert!(apply_task_update(
@@ -1108,6 +1347,23 @@ mod suite {
         assert_eq!(invalid.text, "Основной ответ");
         assert!(invalid.task_update.is_none());
         assert!(invalid.task_update_warning.is_some());
+
+        let mut unfinished = ApiAnswer {
+            text: "Ожидаю схему orders. TASK_UPDATE:{\"".into(),
+            task_update: None,
+            task_update_warning: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            session_input_tokens: 0,
+            session_output_tokens: 0,
+        };
+        process_task_answer(&mut unfinished, TaskPhase::Execution);
+        assert_eq!(unfinished.text, "Ожидаю схему orders.");
+        assert!(unfinished.task_update.is_none());
+        let warning = unfinished.task_update_warning.unwrap();
+        assert!(warning.contains("EOF while parsing a string"));
+        assert!(warning.contains("получено: \"{\\\"\""));
+        assert!(warning.contains("TODO не изменён"));
     }
 
     #[test]
@@ -1126,7 +1382,9 @@ mod suite {
                 },
             )
             .unwrap();
-        task = store.advance_task(task.id).unwrap();
+        task = store
+            .advance_task(task.id, task.phase, task.plan_version)
+            .unwrap();
         let mut pool = AgentPool::new(1, Client::new(), test_agent_settings());
         pool.set_memory(ActiveMemory {
             task: Some(task.clone()),
@@ -1228,7 +1486,9 @@ mod suite {
                 },
             )
             .unwrap();
-        task = store.advance_task(task.id).unwrap();
+        task = store
+            .advance_task(task.id, task.phase, task.plan_version)
+            .unwrap();
         let full =
             "Команда резервного копирования:\n```bash\nsqlite3 app.db \".backup 'copy.db'\"\n```";
         task = store
@@ -1252,7 +1512,10 @@ mod suite {
         drop(store);
 
         let store = SessionStore::open(&path).unwrap();
-        let task = store.advance_task(id).unwrap();
+        let current = store.load_task(id).unwrap();
+        let task = store
+            .advance_task(id, current.phase, current.plan_version)
+            .unwrap();
         assert_eq!(task.phase, TaskPhase::Validation);
         assert_eq!(task.results[0].content, full);
         let mut agent = Agent::new(1, Client::new(), test_agent_settings());
@@ -1303,7 +1566,9 @@ mod suite {
                 },
             )
             .unwrap();
-        task = store.advance_task(task.id).unwrap();
+        task = store
+            .advance_task(task.id, task.phase, task.plan_version)
+            .unwrap();
         let delta = TaskUpdate {
             ed: vec![1],
             ..TaskUpdate::default()
@@ -1346,12 +1611,25 @@ mod suite {
         let directory = tempfile::tempdir().unwrap();
         let store = SessionStore::open(&directory.path().join("stale.db")).unwrap();
         let task = store.create_task("Устаревшая", "Контекст").unwrap();
+        let task = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Planning,
+                &TaskUpdate {
+                    e: vec!["Выполнить".into()],
+                    v: vec!["Проверить".into()],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
         let mut pool = AgentPool::new(1, Client::new(), test_agent_settings());
         pool.set_memory(ActiveMemory {
             task: Some(task.clone()),
             ..ActiveMemory::default()
         });
-        store.advance_task(task.id).unwrap();
+        store
+            .advance_task(task.id, task.phase, task.plan_version)
+            .unwrap();
         let mut answer = ApiAnswer {
             text: "План".into(),
             task_update: Some(TaskUpdate {
@@ -1376,9 +1654,77 @@ mod suite {
     }
 
     #[test]
-    fn legacy_task_todo_migrates_lazily_and_full_lifecycle_survives_reopen() {
+    fn current_task_schema_preserves_versions_and_lifecycle_after_reopen() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("legacy-task.db");
+        let path = directory.path().join("current-task.db");
+        let store = SessionStore::open(&path).unwrap();
+        let mut task = store.create_task("Новая задача", "Исходный факт").unwrap();
+        assert_eq!(task.plan_version, 0);
+        assert_eq!(task.approved_plan_version, None);
+        task = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Planning,
+                &TaskUpdate {
+                    e: vec!["Выполнить".into()],
+                    v: vec!["Проверить".into()],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(task.plan_version, 1);
+        task = store
+            .advance_task(task.id, task.phase, task.plan_version)
+            .unwrap();
+        assert_eq!(task.approved_plan_version, Some(1));
+        task = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Execution,
+                &TaskUpdate {
+                    ed: vec![1],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(task.phase, TaskPhase::Execution);
+        task = store
+            .advance_task(task.id, task.phase, task.plan_version)
+            .unwrap();
+        task = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Validation,
+                &TaskUpdate {
+                    vd: vec![1],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        task = store
+            .advance_task(task.id, task.phase, task.plan_version)
+            .unwrap();
+        assert_eq!(task.phase, TaskPhase::Done);
+        drop(store);
+
+        let store = SessionStore::open(&path).unwrap();
+        let restored = store.load_task(1).unwrap();
+        assert_eq!(restored.phase, TaskPhase::Done);
+        assert_eq!(restored.plan_version, 1);
+        assert_eq!(restored.approved_plan_version, Some(1));
+        assert!(restored.todo.execution[0].done);
+        assert!(restored.todo.validation[0].done);
+        let encoded: String = store
+            .connection
+            .query_row("SELECT todo FROM tasks WHERE id = 1", [], |row| row.get(0))
+            .unwrap();
+        assert!(encoded.starts_with("f["));
+    }
+
+    #[test]
+    fn existing_database_can_create_versioned_new_task() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("old-task.db");
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
@@ -1391,62 +1737,37 @@ mod suite {
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 INSERT INTO tasks (title, todo, phase)
-                VALUES ('Legacy', 'Старый TODO', 'planning');",
+                VALUES ('Старая', 'Старый TODO', 'execution');",
             )
             .unwrap();
         drop(connection);
-
         let store = SessionStore::open(&path).unwrap();
-        let mut task = store.load_task(1).unwrap();
-        assert_eq!(task.todo.facts, vec!["Старый TODO"]);
-        task = store
+        let existing = store.load_task(1).unwrap();
+        assert_eq!(existing.phase, TaskPhase::Execution);
+        assert_eq!(existing.todo.facts, vec!["Старый TODO"]);
+        let task = store.create_task("День 15", "Проверить переходы").unwrap();
+        assert_eq!(task.plan_version, 0);
+        assert_eq!(task.approved_plan_version, None);
+        let task = store
             .save_task_update(
                 task.id,
                 TaskPhase::Planning,
                 &TaskUpdate {
-                    e: vec!["Выполнить".into()],
+                    e: vec!["Сделать".into()],
                     v: vec!["Проверить".into()],
                     ..TaskUpdate::default()
                 },
             )
             .unwrap();
-        task = store.advance_task(task.id).unwrap();
-        task = store
-            .save_task_update(
-                task.id,
-                TaskPhase::Execution,
-                &TaskUpdate {
-                    ed: vec![1],
-                    ..TaskUpdate::default()
-                },
-            )
+        let task = store
+            .advance_task(task.id, task.phase, task.plan_version)
             .unwrap();
-        assert_eq!(task.phase, TaskPhase::Execution);
-        task = store.advance_task(task.id).unwrap();
-        task = store
-            .save_task_update(
-                task.id,
-                TaskPhase::Validation,
-                &TaskUpdate {
-                    vd: vec![1],
-                    ..TaskUpdate::default()
-                },
-            )
-            .unwrap();
-        task = store.advance_task(task.id).unwrap();
-        assert_eq!(task.phase, TaskPhase::Done);
+        assert_eq!(task.approved_plan_version, Some(1));
         drop(store);
 
         let store = SessionStore::open(&path).unwrap();
-        let restored = store.load_task(1).unwrap();
-        assert_eq!(restored.phase, TaskPhase::Done);
-        assert!(restored.todo.execution[0].done);
-        assert!(restored.todo.validation[0].done);
-        let encoded: String = store
-            .connection
-            .query_row("SELECT todo FROM tasks WHERE id = 1", [], |row| row.get(0))
-            .unwrap();
-        assert!(encoded.starts_with("f["));
+        assert_eq!(store.load_task(task.id).unwrap(), task);
+        assert_eq!(store.load_task(existing.id).unwrap(), existing);
     }
 
     #[test]
@@ -1543,11 +1864,41 @@ mod suite {
             )
             .unwrap();
         assert_eq!(task.todo.execution[0].text, "Реализовать");
-        for expected in [TaskPhase::Execution, TaskPhase::Validation, TaskPhase::Done] {
-            task = store.advance_task(task.id).unwrap();
-            assert_eq!(task.phase, expected);
-        }
-        assert!(store.advance_task(task.id).is_err());
+        task = store
+            .advance_task(task.id, task.phase, task.plan_version)
+            .unwrap();
+        assert_eq!(task.phase, TaskPhase::Execution);
+        task = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Execution,
+                &TaskUpdate {
+                    ed: vec![1],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        task = store
+            .advance_task(task.id, task.phase, task.plan_version)
+            .unwrap();
+        assert_eq!(task.phase, TaskPhase::Validation);
+        task = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Validation,
+                &TaskUpdate {
+                    vd: vec![1],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        task = store
+            .advance_task(task.id, task.phase, task.plan_version)
+            .unwrap();
+        assert_eq!(task.phase, TaskPhase::Done);
+        assert!(store
+            .advance_task(task.id, task.phase, task.plan_version)
+            .is_err());
 
         let messages = vec![Message {
             role: "user".into(),
@@ -1644,7 +1995,9 @@ mod suite {
                 },
             )
             .unwrap();
-        task = store.advance_task(task.id).unwrap();
+        task = store
+            .advance_task(task.id, task.phase, task.plan_version)
+            .unwrap();
         task = store
             .save_task_update(
                 task.id,
@@ -1655,6 +2008,10 @@ mod suite {
                 },
             )
             .unwrap();
+        assert!(advance_task_if_confirmed(&store, &task, false)
+            .unwrap()
+            .is_none());
+        assert_eq!(store.load_task(task.id).unwrap(), task);
         let id = store
             .save(
                 None,
@@ -1685,6 +2042,8 @@ mod suite {
         assert!(loaded.messages.is_empty());
         let restored = loaded.task.unwrap();
         assert_eq!(restored.phase, TaskPhase::Execution);
+        assert_eq!(restored.plan_version, 1);
+        assert_eq!(restored.approved_plan_version, Some(1));
         assert!(restored.todo.execution[0].done);
         assert!(!restored.todo.execution[1].done);
         let mut agent = Agent::new(1, Client::new(), test_agent_settings());
@@ -1695,7 +2054,10 @@ mod suite {
         let instructions = agent.request_settings().instructions.unwrap();
         assert!(instructions.contains("1,1,\"Первый шаг\""));
         assert!(instructions.contains("2,0,\"Второй шаг\""));
+        assert!(instructions.contains("Версия плана: 1"));
+        assert!(instructions.contains("Утверждена версия: 1"));
         assert!(instructions.contains("выполняй первый применимый незавершённый пункт e"));
+        assert!(instructions.contains("Текущий шаг: e#2"));
     }
 
     #[test]
@@ -1750,6 +2112,8 @@ mod suite {
             title: "Память".into(),
             todo,
             phase: TaskPhase::Validation,
+            plan_version: 1,
+            approved_plan_version: Some(1),
             results: Vec::new(),
         };
         for strategy in [
@@ -1818,6 +2182,8 @@ mod suite {
                 title: "Задача".into(),
                 todo: TaskTodo::from_description("TODO").unwrap(),
                 phase: TaskPhase::Planning,
+                plan_version: 0,
+                approved_plan_version: None,
                 results: Vec::new(),
             }),
             long_term_facts: long_term_facts.clone(),
@@ -1881,6 +2247,8 @@ mod suite {
                 title: "Задача".into(),
                 todo,
                 phase: TaskPhase::Execution,
+                plan_version: 1,
+                approved_plan_version: Some(1),
                 results: Vec::new(),
             }),
             long_term_facts: vec![MemoryEntry {
@@ -1958,6 +2326,18 @@ mod suite {
             .unwrap()
             .is_none());
         assert_eq!(store.load_task(task.id).unwrap().phase, TaskPhase::Planning);
+        assert!(advance_task_if_confirmed(&store, &task, true).is_err());
+        let task = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Planning,
+                &TaskUpdate {
+                    e: vec!["Сделать".into()],
+                    v: vec!["Проверить".into()],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
         let advanced = advance_task_if_confirmed(&store, &task, true)
             .unwrap()
             .unwrap();
@@ -2583,7 +2963,9 @@ mod suite {
                 },
             )
             .unwrap();
-        task = store.advance_task(task.id).unwrap();
+        task = store
+            .advance_task(task.id, task.phase, task.plan_version)
+            .unwrap();
         let checker = ScriptedClient::new(vec![
             scripted_answer("Предложение Python\nTASK_UPDATE:{\"ed\":[1],\"s\":\"готово\"}"),
             scripted_answer(r#"{"verdict":"violation","invariant_ids":[7],"reason":"конфликт"}"#),
