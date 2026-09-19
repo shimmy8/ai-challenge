@@ -103,6 +103,8 @@ impl SessionStore {
                  title TEXT NOT NULL,
                  todo TEXT NOT NULL,
                  phase TEXT NOT NULL DEFAULT 'planning',
+                 plan_version INTEGER NOT NULL DEFAULT 0 CHECK (plan_version >= 0),
+                 approved_plan_version INTEGER CHECK (approved_plan_version IS NULL OR approved_plan_version >= 0),
                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );
@@ -153,6 +155,20 @@ impl SessionStore {
              );
              PRAGMA foreign_keys = ON;",
         )?;
+        for (column, definition) in [
+            (
+                "plan_version",
+                "plan_version INTEGER NOT NULL DEFAULT 0 CHECK (plan_version >= 0)",
+            ),
+            (
+                "approved_plan_version",
+                "approved_plan_version INTEGER CHECK (approved_plan_version IS NULL OR approved_plan_version >= 0)",
+            ),
+        ] {
+            if !has_column(&connection, "tasks", column)? {
+                connection.execute(&format!("ALTER TABLE tasks ADD COLUMN {definition}"), [])?;
+            }
+        }
         if !has_column(&connection, "invariants", "enabled")? {
             connection.execute(
                 "ALTER TABLE invariants ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))",
@@ -622,7 +638,7 @@ impl SessionStore {
 
     pub(crate) fn list_tasks(&self) -> Result<Vec<Task>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, title, todo, phase FROM tasks ORDER BY updated_at DESC, id DESC",
+            "SELECT id, title, todo, phase, plan_version, approved_plan_version FROM tasks ORDER BY updated_at DESC, id DESC",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((
@@ -630,15 +646,19 @@ impl SessionStore {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, Option<i64>>(5)?,
             ))
         })?;
         rows.map(|row| {
-            let (id, title, todo, phase) = row?;
+            let (id, title, todo, phase, plan_version, approved_plan_version) = row?;
             Ok(Task {
                 id,
                 title,
                 todo: decode_task_todo(&todo)?,
                 phase: phase.parse()?,
+                plan_version,
+                approved_plan_version,
                 results: self.load_task_results(id)?,
             })
         })
@@ -646,10 +666,10 @@ impl SessionStore {
     }
 
     pub(crate) fn load_task(&self, id: i64) -> Result<Task> {
-        let (id, title, todo, phase) = self
+        let (id, title, todo, phase, plan_version, approved_plan_version) = self
             .connection
             .query_row(
-                "SELECT id, title, todo, phase FROM tasks WHERE id = ?1",
+                "SELECT id, title, todo, phase, plan_version, approved_plan_version FROM tasks WHERE id = ?1",
                 [id],
                 |row| {
                     Ok((
@@ -657,6 +677,8 @@ impl SessionStore {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
                     ))
                 },
             )
@@ -666,6 +688,8 @@ impl SessionStore {
             title,
             todo: decode_task_todo(&todo)?,
             phase: phase.parse()?,
+            plan_version,
+            approved_plan_version,
             results: self.load_task_results(id)?,
         })
     }
@@ -719,6 +743,13 @@ impl SessionStore {
             "фаза задачи изменилась; обновление TODO отклонено"
         );
         let todo = apply_task_update(&task.todo, task.phase, update)?;
+        let plan_version = if task.phase == TaskPhase::Planning && todo != task.todo {
+            task.plan_version
+                .checked_add(1)
+                .context("исчерпаны версии плана")?
+        } else {
+            task.plan_version
+        };
         let newly_done: Vec<u64> = match task.phase {
             TaskPhase::Execution => task
                 .todo
@@ -753,9 +784,15 @@ impl SessionStore {
             }
         }
         let updated = self.connection.execute(
-            "UPDATE tasks SET todo = ?1, updated_at = CURRENT_TIMESTAMP
-             WHERE id = ?2 AND phase = ?3",
-            params![encode_task_todo(&todo), id, expected_phase.to_string()],
+            "UPDATE tasks SET todo = ?1, plan_version = ?2, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?3 AND phase = ?4 AND plan_version = ?5",
+            params![
+                encode_task_todo(&todo),
+                plan_version,
+                id,
+                expected_phase.to_string(),
+                task.plan_version
+            ],
         )?;
         anyhow::ensure!(
             updated == 1,
@@ -765,17 +802,34 @@ impl SessionStore {
         self.load_task(id)
     }
 
-    pub(crate) fn advance_task(&self, id: i64) -> Result<Task> {
+    pub(crate) fn advance_task(
+        &self,
+        id: i64,
+        expected_phase: TaskPhase,
+        expected_plan_version: i64,
+    ) -> Result<Task> {
         let transaction = self.connection.unchecked_transaction()?;
         let task = self.load_task(id)?;
-        let next = task
-            .phase
-            .next()
-            .with_context(|| format!("задача «{}» уже завершена", task.title))?;
+        anyhow::ensure!(
+            task.phase == expected_phase && task.plan_version == expected_plan_version,
+            "состояние или версия плана изменились; просмотрите задачу и повторите команду"
+        );
+        let next = task.next_phase_if_ready()?;
+        let approved_plan_version = if task.phase == TaskPhase::Planning {
+            Some(task.plan_version)
+        } else {
+            task.approved_plan_version
+        };
         let updated = self.connection.execute(
-            "UPDATE tasks SET phase = ?1, updated_at = CURRENT_TIMESTAMP
-             WHERE id = ?2 AND phase = ?3",
-            params![next.to_string(), id, task.phase.to_string()],
+            "UPDATE tasks SET phase = ?1, approved_plan_version = ?2, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?3 AND phase = ?4 AND plan_version = ?5",
+            params![
+                next.to_string(),
+                approved_plan_version,
+                id,
+                expected_phase.to_string(),
+                expected_plan_version
+            ],
         )?;
         anyhow::ensure!(updated == 1, "фаза задачи изменилась; повторите команду");
         transaction.commit()?;
