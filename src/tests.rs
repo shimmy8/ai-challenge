@@ -25,6 +25,60 @@ mod suite {
         task_phase_start_instruction, task_transition_prompt, ProfileCommandOutcome,
         TaskCommandOutcome, TaskUpdateProgress,
     };
+    use std::{collections::VecDeque, sync::Mutex};
+
+    type RecordedCall = (Option<String>, Vec<Message>, Provider);
+
+    struct ScriptedClient {
+        responses: Mutex<VecDeque<anyhow::Result<ApiAnswer>>>,
+        calls: Mutex<Vec<RecordedCall>>,
+    }
+
+    impl ScriptedClient {
+        fn new(responses: Vec<anyhow::Result<ApiAnswer>>) -> Arc<Self> {
+            Arc::new(Self {
+                responses: Mutex::new(responses.into()),
+                calls: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl RequestClient for ScriptedClient {
+        fn send<'a>(
+            &'a self,
+            _client: &'a Client,
+            settings: &'a AgentSettings,
+            history: &'a [Message],
+        ) -> RequestFuture<'a> {
+            self.calls.lock().unwrap().push((
+                settings.instructions.clone(),
+                history.to_vec(),
+                settings.provider,
+            ));
+            let response = self.responses.lock().unwrap().pop_front().unwrap();
+            Box::pin(async move { response })
+        }
+    }
+
+    fn scripted_answer(text: &str) -> anyhow::Result<ApiAnswer> {
+        Ok(ApiAnswer {
+            text: text.to_owned(),
+            task_update: None,
+            task_update_warning: None,
+            input_tokens: 3,
+            output_tokens: 2,
+            session_input_tokens: 0,
+            session_output_tokens: 0,
+        })
+    }
+
+    fn sample_invariants() -> Vec<Invariant> {
+        vec![Invariant {
+            id: 7,
+            content: "Использовать только Rust".into(),
+            enabled: true,
+        }]
+    }
 
     #[test]
     pub(crate) fn parses_openai_response() {
@@ -51,7 +105,8 @@ mod suite {
         let path = directory.path().join("metrics.log");
         let entry = MetricsLogEntry {
             timestamp_unix_ms: 123,
-            session_id: 42,
+            session_id: Some(42),
+            outcome: "success",
             branch: "variant-a",
             agent_id: 1,
             provider: Provider::Openai,
@@ -70,6 +125,7 @@ mod suite {
         assert_eq!(lines.lines().count(), 2);
         let value: Value = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
         assert_eq!(value["session_id"], 42);
+        assert_eq!(value["outcome"], "success");
         assert_eq!(value["branch"], "variant-a");
         assert_eq!(value["request_input_tokens"], 10);
         assert_eq!(value["session_output_tokens"], 40);
@@ -2087,5 +2143,462 @@ mod suite {
         assert_eq!(payloads[0], payloads[1]);
         assert_eq!(payloads[2], payloads[3]);
         assert_ne!(payloads[0], payloads[2]);
+    }
+
+    #[test]
+    fn invariant_validation_and_store_are_isolated() {
+        assert!(validate_invariant("  ").is_err());
+        assert_eq!(validate_invariant("  Rust  ").unwrap(), "Rust");
+        assert!(validate_invariant(&"я".repeat(INVARIANT_MAX_CHARS)).is_ok());
+        assert!(validate_invariant(&"я".repeat(INVARIANT_MAX_CHARS + 1)).is_err());
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.db");
+        {
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute_batch(
+                "CREATE TABLE sessions (id INTEGER PRIMARY KEY, history_toon TEXT NOT NULL);",
+            )
+            .unwrap();
+        }
+        let store = SessionStore::open(&path).unwrap();
+        assert!(store.list_invariants().unwrap().is_empty());
+        let rule = store.create_invariant("Только Rust").unwrap();
+        assert!(rule.id > 0);
+        assert!(rule.enabled);
+        assert_eq!(store.list_invariants().unwrap(), vec![rule.clone()]);
+        assert!(store.load_invariant(0).is_err());
+        assert!(store.delete_invariant(-1).is_err());
+        assert!(!crate::app::remove_invariant_if_confirmed(&store, rule.id, false).unwrap());
+        assert_eq!(store.list_invariants().unwrap(), vec![rule.clone()]);
+        assert!(store.list_memory_entries().unwrap().is_empty());
+        assert!(store.list_tasks().unwrap().is_empty());
+        assert!(store.list_profiles().unwrap().is_empty());
+        drop(store);
+        let store = SessionStore::open(&path).unwrap();
+        assert_eq!(store.list_invariants().unwrap(), vec![rule.clone()]);
+        assert!(crate::app::remove_invariant_if_confirmed(&store, rule.id, true).unwrap());
+        assert!(store.list_invariants().unwrap().is_empty());
+    }
+
+    #[test]
+    fn invariant_commands_validate_input_and_never_change_other_layers() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("commands.db")).unwrap();
+        assert!(crate::app::handle_invariant_command("/invariant remove xyz", &store).is_err());
+        assert!(crate::app::handle_invariant_command("/invariant disable xyz", &store).is_err());
+        assert!(crate::app::handle_invariant_command("/invariant enable 999", &store).is_err());
+        assert!(crate::app::handle_invariant_command("/invariant unknown", &store).is_err());
+        assert!(!crate::app::handle_invariant_command("/invariant list", &store).unwrap());
+        assert!(
+            crate::app::handle_invariant_command("/invariant add Только Rust", &store).unwrap()
+        );
+        assert_eq!(store.list_invariants().unwrap().len(), 1);
+        let id = store.list_invariants().unwrap()[0].id;
+        assert!(
+            crate::app::handle_invariant_command(&format!("/invariant disable {id}"), &store)
+                .unwrap()
+        );
+        assert!(!store.load_invariant(id).unwrap().enabled);
+        assert!(
+            crate::app::handle_invariant_command(&format!("/invariant enable {id}"), &store)
+                .unwrap()
+        );
+        assert!(store.load_invariant(id).unwrap().enabled);
+        assert!(store.list_memory_entries().unwrap().is_empty());
+        assert!(store.list_profiles().unwrap().is_empty());
+        assert!(store.list_tasks().unwrap().is_empty());
+        assert!(store.list().unwrap().is_empty());
+        assert!(store.create_invariant("   ").is_err());
+        assert_eq!(store.list_invariants().unwrap().len(), 1);
+        for i in 1..INVARIANTS_MAX {
+            store.create_invariant(&format!("Правило {i}")).unwrap();
+        }
+        assert!(store.create_invariant("Лишнее правило").is_err());
+        assert_eq!(store.list_invariants().unwrap().len(), INVARIANTS_MAX);
+    }
+
+    #[test]
+    fn legacy_invariants_migrate_as_enabled_and_toggles_survive_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("old-invariants.db");
+        {
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute_batch(
+                "CREATE TABLE invariants (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); \
+                 INSERT INTO invariants (content) VALUES ('Только Rust');",
+            )
+            .unwrap();
+        }
+        let store = SessionStore::open(&path).unwrap();
+        let original = store.list_invariants().unwrap().remove(0);
+        assert!(original.enabled);
+        let disabled = store.set_invariant_enabled(original.id, false).unwrap();
+        assert_eq!(disabled.id, original.id);
+        assert_eq!(disabled.content, original.content);
+        assert!(!disabled.enabled);
+        drop(store);
+        let store = SessionStore::open(&path).unwrap();
+        assert_eq!(store.load_invariant(original.id).unwrap(), disabled);
+        assert_eq!(
+            store.set_invariant_enabled(original.id, true).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn invariant_prompt_is_global_and_precedes_profile_for_both_providers() {
+        let mut pool = AgentPool::new(2, Client::new(), test_agent_settings());
+        pool.set_invariants(sample_invariants());
+        pool.set_memory(ActiveMemory {
+            profile: Some(Profile {
+                id: 2,
+                name: "Другой стек".into(),
+                instructions: "Используй Python".into(),
+            }),
+            ..ActiveMemory::default()
+        });
+        for strategy in [
+            CompressionStrategy::Summary,
+            CompressionStrategy::SlidingWindow,
+            CompressionStrategy::StickyFacts,
+            CompressionStrategy::Branching,
+        ] {
+            pool.agents[0].settings.compression_strategy = strategy;
+            let settings = pool.agents[0].request_settings();
+            let prompt = settings.instructions.as_deref().unwrap();
+            assert!(
+                prompt.find("#7: Использовать только Rust").unwrap()
+                    < prompt.find("Используй Python").unwrap()
+            );
+            let openai = build_openai_payload(&settings, &[]);
+            let mut claude_settings = settings.clone();
+            claude_settings.provider = Provider::Claude;
+            let claude = build_claude_payload(&claude_settings, &[]);
+            assert_eq!(openai["instructions"], claude["system"]);
+        }
+        pool.reset();
+        assert_eq!(pool.agents[0].invariants, sample_invariants());
+        pool.restore(vec![Message {
+            role: "user".into(),
+            content: "старый диалог".into(),
+        }]);
+        assert_eq!(pool.agents[0].invariants, sample_invariants());
+        pool.reconfigure(test_agent_settings());
+        assert!(pool
+            .agents
+            .iter()
+            .all(|agent| agent.invariants == sample_invariants()));
+        pool.agents[0].settings.compression_strategy = CompressionStrategy::Branching;
+        pool.agents[0].create_checkpoint();
+        pool.agents[0].start_branch("Новая ветка").unwrap();
+        assert_eq!(pool.agents[0].invariants, sample_invariants());
+        pool.agents[0].switch_branch("main").unwrap();
+        assert_eq!(pool.agents[0].invariants, sample_invariants());
+        pool.set_invariants(Vec::new());
+        assert!(!pool.agents[0]
+            .request_settings()
+            .instructions
+            .unwrap()
+            .contains("#7:"));
+    }
+
+    #[test]
+    fn verification_result_rejects_invalid_and_inconsistent_json() {
+        let rules = sample_invariants();
+        for (verdict, ids) in [
+            ("allow", "[]"),
+            ("compliant_refusal", "[7]"),
+            ("violation", "[7]"),
+            ("uncertain", "[]"),
+        ] {
+            let raw =
+                format!(r#"{{"verdict":"{verdict}","invariant_ids":{ids},"reason":"причина"}}"#);
+            assert!(parse_verification_result(&raw, &rules).is_ok());
+        }
+        for raw in [
+            "not json",
+            r#"{"verdict":"allow","invariant_ids":[7],"reason":""}"#,
+            r#"{"verdict":"violation","invariant_ids":[],"reason":"плохо"}"#,
+            r#"{"verdict":"violation","invariant_ids":[8],"reason":"плохо"}"#,
+            r#"{"verdict":"violation","invariant_ids":[7,7],"reason":"плохо"}"#,
+            r#"{"verdict":"violation","invariant_ids":[7],"reason":""}"#,
+            r#"{"verdict":"allow","invariant_ids":[],"reason":"","extra":1}"#,
+        ] {
+            assert!(parse_verification_result(raw, &rules).is_err(), "{raw}");
+        }
+    }
+
+    #[tokio::test]
+    async fn invariant_check_accepts_or_replaces_draft_before_history() {
+        let checker = ScriptedClient::new(vec![
+            scripted_answer("Ответ на Rust"),
+            scripted_answer(r#"{"verdict":"allow","invariant_ids":[],"reason":""}"#),
+        ]);
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = checker.clone();
+        agent.set_invariants(sample_invariants());
+        let answer = agent.ask("Совместимый запрос").await.unwrap();
+        assert_eq!(answer.text, "Ответ на Rust");
+        assert_eq!((answer.input_tokens, answer.output_tokens), (6, 4));
+        assert_eq!(agent.persisted_history.len(), 2);
+        assert_eq!(checker.calls.lock().unwrap().len(), 2);
+
+        let checker = ScriptedClient::new(vec![
+            scripted_answer("Перепиши на Python\nTASK_UPDATE:{\"e\":[\"замена\"]}"),
+            scripted_answer(
+                r#"{"verdict":"violation","invariant_ids":[7],"reason":"черновик нарушает правило"}"#,
+            ),
+        ]);
+        agent.reset();
+        agent.request_client = checker.clone();
+        let answer = agent.ask("Предложи улучшение").await.unwrap();
+        assert!(answer.text.contains("#7: Использовать только Rust"));
+        assert!(!answer.text.contains("Python"));
+        assert!(!answer.text.contains("черновик нарушает правило"));
+        assert!(answer.task_update.is_none());
+        assert_eq!(agent.persisted_history[1].content, answer.text);
+        let calls = checker.calls.lock().unwrap();
+        assert!(calls[1].1[0].content.contains("TASK_UPDATE"));
+    }
+
+    #[tokio::test]
+    async fn failed_or_uncertain_check_restores_branch_and_keeps_usage() {
+        for verdict in [
+            r#"{"verdict":"uncertain","invariant_ids":[],"reason":"правила противоречат"}"#,
+            "not json",
+        ] {
+            let checker =
+                ScriptedClient::new(vec![scripted_answer("Черновик"), scripted_answer(verdict)]);
+            let mut settings = test_agent_settings();
+            settings.compression_strategy = CompressionStrategy::Branching;
+            let mut agent = Agent::new(1, Client::new(), settings);
+            agent.request_client = checker;
+            agent.set_invariants(sample_invariants());
+            agent.create_checkpoint();
+            let before = agent.snapshot();
+            let error = agent.ask("Новая ветка").await.err().unwrap();
+            assert!(error.to_string().contains("провер"));
+            assert_eq!(agent.history, before.history);
+            assert_eq!(agent.persisted_history, before.persisted_history);
+            assert_eq!(agent.summary, before.summary);
+            assert_eq!(agent.facts, before.facts);
+            assert_eq!(agent.active_branch, "main");
+            assert!(agent.branch_pending);
+            assert_eq!(agent.branches.len(), 1);
+            assert!(agent.checkpoint.is_some());
+            assert_eq!(
+                (agent.session_input_tokens, agent.session_output_tokens),
+                (6, 4)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn compliant_refusal_with_task_update_is_rejected() {
+        let checker = ScriptedClient::new(vec![
+            scripted_answer("Отказываю\nTASK_UPDATE:{\"e\":[\"пункт\"]}"),
+            scripted_answer(
+                r#"{"verdict":"compliant_refusal","invariant_ids":[7],"reason":"конфликт"}"#,
+            ),
+        ]);
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = checker;
+        agent.set_invariants(sample_invariants());
+        assert!(agent.ask("Конфликт").await.is_err());
+        assert!(agent.persisted_history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_invariant_set_skips_check() {
+        let checker = ScriptedClient::new(vec![scripted_answer("Без проверки")]);
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = checker.clone();
+        assert_eq!(agent.ask("Запрос").await.unwrap().text, "Без проверки");
+        assert_eq!(checker.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn disabled_invariant_is_absent_from_both_payloads_and_skips_check() {
+        let mut disabled = sample_invariants();
+        disabled[0].enabled = false;
+        let checker = ScriptedClient::new(vec![scripted_answer("Ответ без проверки")]);
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = checker.clone();
+        agent.set_invariants(disabled);
+        assert!(agent.invariants.is_empty());
+        let settings = agent.request_settings();
+        assert!(!build_openai_payload(&settings, &[])["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("#7:"));
+        let mut claude_settings = settings.clone();
+        claude_settings.provider = Provider::Claude;
+        assert!(!build_claude_payload(&claude_settings, &[])["system"]
+            .as_str()
+            .unwrap()
+            .contains("#7:"));
+        assert_eq!(
+            agent.ask("Запрос").await.unwrap().text,
+            "Ответ без проверки"
+        );
+        assert_eq!(checker.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ordinary_message_does_not_create_invariant() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("ordinary.db")).unwrap();
+        let checker = ScriptedClient::new(vec![scripted_answer("Я понял запрос")]);
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = checker;
+        assert!(agent.ask("Запомни это как правило").await.is_ok());
+        assert!(store.list_invariants().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn selected_provider_is_used_for_main_and_verifier_calls() {
+        for provider in [Provider::Openai, Provider::Claude] {
+            let checker = ScriptedClient::new(vec![
+                scripted_answer("Ответ на Rust"),
+                scripted_answer(r#"{"verdict":"allow","invariant_ids":[],"reason":""}"#),
+            ]);
+            let mut settings = test_agent_settings();
+            settings.provider = provider;
+            let mut agent = Agent::new(1, Client::new(), settings);
+            agent.request_client = checker.clone();
+            agent.set_invariants(sample_invariants());
+            assert!(agent.ask("Совместимый запрос").await.is_ok());
+            let calls = checker.calls.lock().unwrap();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0].2, provider);
+            assert_eq!(calls[1].2, provider);
+            assert!(calls[0].0.as_deref().unwrap().contains("#7:"));
+            assert!(calls[1].0.as_deref().unwrap().contains("Проверь запрос"));
+        }
+    }
+
+    #[tokio::test]
+    async fn verifier_api_failure_keeps_primary_usage_and_discards_history() {
+        let checker = ScriptedClient::new(vec![
+            scripted_answer("Черновик"),
+            Err(anyhow::anyhow!("API недоступен")),
+        ]);
+        let mut pool = AgentPool::new(1, Client::new(), test_agent_settings());
+        pool.agents[0].request_client = checker;
+        pool.set_invariants(sample_invariants());
+        let runs = pool.ask_all("Запрос").await;
+        assert!(runs[0].result.is_err());
+        assert_eq!((runs[0].input_tokens, runs[0].output_tokens), (3, 2));
+        assert!(pool.persisted_history().is_empty());
+        assert!(runs[0]
+            .result
+            .as_ref()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("проверки"));
+    }
+
+    #[tokio::test]
+    async fn compliant_refusal_is_accepted_without_task_update() {
+        let checker = ScriptedClient::new(vec![
+            scripted_answer(
+                "Не могу перевести проект на Python: действует правило #7 — только Rust.",
+            ),
+            scripted_answer(
+                r#"{"verdict":"compliant_refusal","invariant_ids":[7],"reason":"конфликт запроса"}"#,
+            ),
+        ]);
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = checker;
+        agent.set_invariants(sample_invariants());
+        let answer = agent.ask("Переведи на Python").await.unwrap();
+        assert!(answer.text.contains("#7"));
+        assert!(answer.task_update.is_none());
+        assert_eq!(agent.persisted_history.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn failed_check_restores_summary_and_sticky_facts() {
+        let old = vec![
+            Message {
+                role: "user".into(),
+                content: "старый вопрос".into(),
+            },
+            Message {
+                role: "assistant".into(),
+                content: "старый ответ".into(),
+            },
+            Message {
+                role: "user".into(),
+                content: "ещё вопрос".into(),
+            },
+        ];
+        let checker = ScriptedClient::new(vec![
+            scripted_answer("Новое summary"),
+            scripted_answer("Черновик"),
+            scripted_answer("не JSON"),
+        ]);
+        let mut settings = test_agent_settings();
+        settings.context_messages = 1;
+        let mut agent = Agent::new(1, Client::new(), settings);
+        agent.restore(old.clone());
+        agent.summary = "Старое summary".into();
+        agent.request_client = checker;
+        agent.set_invariants(sample_invariants());
+        assert!(agent.ask("новый запрос").await.is_err());
+        assert_eq!(agent.history, old);
+        assert_eq!(agent.persisted_history, old);
+        assert_eq!(agent.summary, "Старое summary");
+
+        let checker = ScriptedClient::new(vec![
+            scripted_answer(r#"{"new":"fact"}"#),
+            scripted_answer("Черновик"),
+            scripted_answer("не JSON"),
+        ]);
+        agent.settings.compression_strategy = CompressionStrategy::StickyFacts;
+        agent.settings.context_messages = 10;
+        agent.request_client = checker;
+        agent.facts.insert("old".into(), "value".into());
+        assert!(agent.ask("новый запрос").await.is_err());
+        assert_eq!(agent.facts.get("old").map(String::as_str), Some("value"));
+        assert!(!agent.facts.contains_key("new"));
+        assert_eq!(agent.persisted_history, old);
+    }
+
+    #[tokio::test]
+    async fn rejected_automatic_task_step_keeps_todo_and_phase() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("tasks.db")).unwrap();
+        let mut task = store.create_task("Тест", "Проверить пункт").unwrap();
+        task = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Planning,
+                &TaskUpdate {
+                    e: vec!["Первый шаг".into(), "Второй шаг".into()],
+                    v: vec!["Проверить".into()],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        task = store.advance_task(task.id).unwrap();
+        let checker = ScriptedClient::new(vec![
+            scripted_answer("Предложение Python\nTASK_UPDATE:{\"ed\":[1],\"s\":\"готово\"}"),
+            scripted_answer(r#"{"verdict":"violation","invariant_ids":[7],"reason":"конфликт"}"#),
+        ]);
+        let mut agents = AgentPool::new(1, Client::new(), test_agent_settings());
+        agents.agents[0].request_client = checker;
+        agents.set_invariants(sample_invariants());
+        agents.set_memory(ActiveMemory {
+            task: Some(task.clone()),
+            ..ActiveMemory::default()
+        });
+        let mut results = agents.ask_all("Начни execution").await;
+        let answer = results[0].result.as_mut().unwrap();
+        assert!(persist_answer_task_update(&store, &mut agents, answer).is_none());
+        assert_eq!(store.load_task(task.id).unwrap(), task);
+        assert_eq!(agents.memory().task.unwrap().phase, TaskPhase::Execution);
     }
 }

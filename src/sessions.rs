@@ -92,6 +92,12 @@ impl SessionStore {
                  content TEXT NOT NULL,
                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );
+             CREATE TABLE IF NOT EXISTS invariants (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 content TEXT NOT NULL,
+                 enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
              CREATE TABLE IF NOT EXISTS tasks (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  title TEXT NOT NULL,
@@ -147,6 +153,12 @@ impl SessionStore {
              );
              PRAGMA foreign_keys = ON;",
         )?;
+        if !has_column(&connection, "invariants", "enabled")? {
+            connection.execute(
+                "ALTER TABLE invariants ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))",
+                [],
+            )?;
+        }
         for (column, definition) in [
             (
                 "profile_id",
@@ -460,6 +472,75 @@ impl SessionStore {
             )
             .context("не удалось сохранить долговременный факт")?;
         self.load_memory_entry(self.connection.last_insert_rowid())
+    }
+
+    pub(crate) fn create_invariant(&self, content: &str) -> Result<Invariant> {
+        let content = validate_invariant(content)?;
+        let transaction = self.connection.unchecked_transaction()?;
+        let count: i64 =
+            self.connection
+                .query_row("SELECT COUNT(*) FROM invariants", [], |row| row.get(0))?;
+        anyhow::ensure!(
+            count < INVARIANTS_MAX as i64,
+            "достигнут предел инвариантов ({INVARIANTS_MAX})"
+        );
+        self.connection
+            .execute("INSERT INTO invariants (content) VALUES (?1)", [content])?;
+        let id = self.connection.last_insert_rowid();
+        let invariant = self.load_invariant(id)?;
+        transaction.commit()?;
+        Ok(invariant)
+    }
+
+    pub(crate) fn list_invariants(&self) -> Result<Vec<Invariant>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT id, content, enabled FROM invariants ORDER BY id")?;
+        let rows = statement.query_map([], |row| {
+            Ok(Invariant {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                enabled: row.get(2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn load_invariant(&self, id: i64) -> Result<Invariant> {
+        anyhow::ensure!(id > 0, "некорректный ID инварианта");
+        self.connection
+            .query_row(
+                "SELECT id, content, enabled FROM invariants WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok(Invariant {
+                        id: row.get(0)?,
+                        content: row.get(1)?,
+                        enabled: row.get(2)?,
+                    })
+                },
+            )
+            .with_context(|| format!("инвариант #{id} не найден"))
+    }
+
+    pub(crate) fn delete_invariant(&self, id: i64) -> Result<()> {
+        anyhow::ensure!(id > 0, "некорректный ID инварианта");
+        let deleted = self
+            .connection
+            .execute("DELETE FROM invariants WHERE id = ?1", [id])?;
+        anyhow::ensure!(deleted == 1, "инвариант #{id} не найден");
+        Ok(())
+    }
+
+    pub(crate) fn set_invariant_enabled(&self, id: i64, enabled: bool) -> Result<Invariant> {
+        anyhow::ensure!(id > 0, "некорректный ID инварианта");
+        let updated = self.connection.execute(
+            "UPDATE invariants SET enabled = ?1 WHERE id = ?2",
+            params![enabled, id],
+        )?;
+        anyhow::ensure!(updated == 1, "инвариант #{id} не найден");
+        self.load_invariant(id)
     }
 
     pub(crate) fn list_memory_entries(&self) -> Result<Vec<MemoryEntry>> {
