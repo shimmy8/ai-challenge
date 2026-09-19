@@ -100,6 +100,14 @@ impl SessionStore {
                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );
+             CREATE TABLE IF NOT EXISTS task_step_results (
+                 task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                 phase TEXT NOT NULL CHECK (phase IN ('execution', 'validation')),
+                 item_id INTEGER NOT NULL,
+                 summary TEXT NOT NULL,
+                 content TEXT NOT NULL,
+                 PRIMARY KEY (task_id, phase, item_id)
+             );
              CREATE TABLE IF NOT EXISTS sessions (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  title TEXT NOT NULL,
@@ -526,7 +534,7 @@ impl SessionStore {
         let (title, todo) = validate_task(title, todo)?;
         self.connection.execute(
             "INSERT INTO tasks (title, todo, phase) VALUES (?1, ?2, 'planning')",
-            params![title, todo],
+            params![title, encode_task_todo(&todo)],
         )?;
         self.load_task(self.connection.last_insert_rowid())
     }
@@ -548,8 +556,9 @@ impl SessionStore {
             Ok(Task {
                 id,
                 title,
-                todo,
+                todo: decode_task_todo(&todo)?,
                 phase: phase.parse()?,
+                results: self.load_task_results(id)?,
             })
         })
         .collect()
@@ -574,18 +583,104 @@ impl SessionStore {
         Ok(Task {
             id,
             title,
-            todo,
+            todo: decode_task_todo(&todo)?,
             phase: phase.parse()?,
+            results: self.load_task_results(id)?,
         })
     }
 
-    pub(crate) fn update_task_todo(&self, id: i64, todo: &str) -> Result<Task> {
-        let todo = validate_memory_text(todo, "TODO задачи", TASK_TODO_MAX_CHARS)?;
-        let updated = self.connection.execute(
-            "UPDATE tasks SET todo = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
-            params![todo, id],
+    fn load_task_results(&self, id: i64) -> Result<Vec<TaskStepResult>> {
+        let mut statement = self.connection.prepare(
+            "SELECT phase, item_id, summary, content FROM task_step_results
+             WHERE task_id = ?1 ORDER BY CASE phase WHEN 'execution' THEN 0 ELSE 1 END, item_id",
         )?;
-        anyhow::ensure!(updated == 1, "задача #{id} не найдена");
+        let rows = statement.query_map([id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (phase, item_id, summary, content) = row?;
+            Ok(TaskStepResult {
+                phase: phase.parse()?,
+                item_id,
+                summary,
+                content,
+            })
+        })
+        .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn save_task_update(
+        &self,
+        id: i64,
+        expected_phase: TaskPhase,
+        update: &TaskUpdate,
+    ) -> Result<Task> {
+        self.save_task_update_with_result(id, expected_phase, update, None)
+    }
+
+    pub(crate) fn save_task_update_with_result(
+        &self,
+        id: i64,
+        expected_phase: TaskPhase,
+        update: &TaskUpdate,
+        answer: Option<&str>,
+    ) -> Result<Task> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let task = self.load_task(id)?;
+        anyhow::ensure!(
+            task.phase == expected_phase,
+            "фаза задачи изменилась; обновление TODO отклонено"
+        );
+        let todo = apply_task_update(&task.todo, task.phase, update)?;
+        let newly_done: Vec<u64> = match task.phase {
+            TaskPhase::Execution => task
+                .todo
+                .execution
+                .iter()
+                .filter(|item| !item.done && update.ed.contains(&item.id))
+                .map(|item| item.id)
+                .collect(),
+            TaskPhase::Validation => task
+                .todo
+                .validation
+                .iter()
+                .filter(|item| !item.done && update.vd.contains(&item.id))
+                .map(|item| item.id)
+                .collect(),
+            TaskPhase::Planning | TaskPhase::Done => Vec::new(),
+        };
+        if let Some(answer) = answer {
+            if !newly_done.is_empty() {
+                anyhow::ensure!(
+                    !answer.trim().is_empty(),
+                    "результат завершённого пункта пуст"
+                );
+                let summary = task_result_summary(update, answer);
+                for item_id in newly_done {
+                    self.connection.execute(
+                        "INSERT INTO task_step_results (task_id, phase, item_id, summary, content)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![id, task.phase.to_string(), item_id, summary, answer],
+                    )?;
+                }
+            }
+        }
+        let updated = self.connection.execute(
+            "UPDATE tasks SET todo = ?1, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?2 AND phase = ?3",
+            params![encode_task_todo(&todo), id, expected_phase.to_string()],
+        )?;
+        anyhow::ensure!(
+            updated == 1,
+            "фаза задачи изменилась; обновление TODO отклонено"
+        );
+        transaction.commit()?;
         self.load_task(id)
     }
 
