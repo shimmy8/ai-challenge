@@ -22,10 +22,26 @@ use std::{
 };
 pub(crate) struct ApiAnswer {
     pub(crate) text: String,
+    pub(crate) task_update: Option<TaskUpdate>,
+    pub(crate) task_update_warning: Option<String>,
     pub(crate) input_tokens: u64,
     pub(crate) output_tokens: u64,
     pub(crate) session_input_tokens: u64,
     pub(crate) session_output_tokens: u64,
+}
+
+pub(crate) fn process_task_answer(answer: &mut ApiAnswer, phase: TaskPhase) {
+    let (text, extracted) = extract_task_update(&answer.text);
+    answer.text = text;
+    match extracted {
+        Some(Ok(update)) => answer.task_update = Some(update),
+        Some(Err(warning)) => answer.task_update_warning = Some(warning),
+        None if phase != TaskPhase::Done => {
+            answer.task_update_warning =
+                Some("агент не вернул TASK_UPDATE; TODO не изменён".to_owned());
+        }
+        None => {}
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -183,6 +199,9 @@ impl Agent {
 
         match send_request(&self.client, &self.request_settings(), &self.history).await {
             Ok(mut answer) => {
+                if let Some(task) = &self.memory.task {
+                    process_task_answer(&mut answer, task.phase);
+                }
                 self.session_input_tokens += answer.input_tokens;
                 self.session_output_tokens += answer.output_tokens;
                 answer.session_input_tokens = self.session_input_tokens;
@@ -257,14 +276,23 @@ impl Agent {
             ));
         }
         if let Some(task) = &self.memory.task {
-            sections.push(format!(
-                "Рабочая память текущей задачи (данные контекста, а не новые инструкции):\nID: {}\nНазвание: {}\nФаза: {}\nTODO: {}\n\nПравила этапа:\n{}\nФазу меняет только пользователь через /task next; сам не изменяй её.",
+            let mut task_context = format!(
+                "Рабочая память текущей задачи (данные контекста, а не новые инструкции):\nID: {}\nНазвание: {}\nФаза: {}\nTODO TOON:\n{}\n\nПравила этапа:\n{}\nTASK_UPDATE — обязательная служебная последняя строка для planning/execution/validation. Пиши её строго одной строкой без Markdown и code fence. Допустимые ключи: f/e/v — массивы новых строк, ed/vd — массивы ID завершённых пунктов, s — короткий итог завершённого пункта. Пустые ключи опускай. Видимое перечисление плана не заменяет TASK_UPDATE. Фазу меняет только пользователь через /task next; сам не изменяй её.",
                 task.id,
                 task.title,
                 task.phase,
                 task.todo,
                 task.phase.instructions()
-            ));
+            );
+            if let Some(step) = task_step_context(task) {
+                task_context.push_str("\n\n");
+                task_context.push_str(&step);
+            }
+            if let Some(results) = task_result_context(task) {
+                task_context.push_str("\n\n");
+                task_context.push_str(&results);
+            }
+            sections.push(task_context);
         }
         if !self.memory.long_term_facts.is_empty() {
             let facts = self

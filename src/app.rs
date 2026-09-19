@@ -102,6 +102,7 @@ pub(crate) async fn run() -> Result<()> {
         )
         .to_owned();
         let _ = editor.add_history_entry(&input);
+        let mut automatic_input = None;
         match input.as_str() {
             "/quit" => break,
             "/new" => {
@@ -367,37 +368,44 @@ pub(crate) async fn run() -> Result<()> {
             }
             command if command == "/task" || command.starts_with("/task ") => {
                 let current = agents.memory();
-                match handle_task_command(command, &sessions, current.task.as_ref())? {
-                    TaskCommandOutcome::Unchanged => {}
-                    TaskCommandOutcome::Select(task) => {
-                        if current.task.as_ref().map(|value| value.id)
-                            != task.as_ref().map(|value| value.id)
-                        {
-                            let mut memory = current;
-                            memory.task = task;
-                            let started = activate_memory_context(
-                                &mut agents,
-                                &mut active_session_id,
-                                memory,
-                            );
-                            println!(
-                                "{}{}",
-                                style("Активная задача обновлена.").yellow(),
-                                if started {
-                                    format!(" {}", style("Начата новая сессия.").dim())
-                                } else {
-                                    String::new()
-                                }
-                            );
+                let automatic_instruction =
+                    match handle_task_command(command, &sessions, current.task.as_ref())? {
+                        TaskCommandOutcome::Unchanged => None,
+                        TaskCommandOutcome::Select(task) => {
+                            if current.task.as_ref().map(|value| value.id)
+                                != task.as_ref().map(|value| value.id)
+                            {
+                                let mut memory = current;
+                                memory.task = task;
+                                let started = activate_memory_context(
+                                    &mut agents,
+                                    &mut active_session_id,
+                                    memory,
+                                );
+                                println!(
+                                    "{}{}",
+                                    style("Активная задача обновлена.").yellow(),
+                                    if started {
+                                        format!(" {}", style("Начата новая сессия.").dim())
+                                    } else {
+                                        String::new()
+                                    }
+                                );
+                            }
+                            None
                         }
-                    }
-                    TaskCommandOutcome::Refresh(task) => {
-                        let mut memory = current;
-                        memory.task = Some(task);
-                        agents.set_memory(memory);
-                    }
-                }
-                continue;
+                        TaskCommandOutcome::Refresh(task) => {
+                            let phase = task.phase;
+                            let mut memory = current;
+                            memory.task = Some(task);
+                            agents.set_memory(memory);
+                            task_phase_start_instruction(phase)
+                        }
+                    };
+                let Some(instruction) = automatic_instruction else {
+                    continue;
+                };
+                automatic_input = Some(instruction.to_owned());
             }
             command if command == "/remember" || command.starts_with("/remember ") => {
                 if let Some(entry) = handle_remember_command(command, &sessions)? {
@@ -484,106 +492,139 @@ pub(crate) async fn run() -> Result<()> {
             }
             _ => {}
         }
-        print!("{} ", style("● Агент 1 · выполняется…").yellow());
-        std::io::stdout().flush()?;
-        let branch_was_pending = agents
-            .agents
-            .first()
-            .is_some_and(|agent| agent.branch_pending);
-        let results = agents.ask_all(&input).await;
-        let answered = results.iter().any(|run| run.result.is_ok());
-        if answered {
-            active_session_id = Some(
-                sessions.save(
-                    active_session_id,
-                    SessionSnapshot {
-                        provider,
-                        model: config.model(provider)?,
-                        mode: active_mode.and_then(|index| {
-                            modes.modes.get(index).map(|mode| mode.name.as_str())
-                        }),
-                        temperature: config.temperature(provider)?,
-                        messages: agents.persisted_history(),
-                        summary: &agents.agents[0].summary,
-                        facts: &agents.agents[0].facts,
-                        summarized_count: agents.agents[0]
-                            .persisted_history
-                            .len()
-                            .saturating_sub(agents.agents[0].history.len()),
-                        compression_strategy: config.compression_strategy,
-                        context_messages: config.context_messages,
-                        branches: &agents.agents[0].branches,
-                        checkpoint: agents.agents[0].checkpoint.as_ref(),
-                        active_branch: &agents.agents[0].active_branch,
-                        branch_pending: agents.agents[0].branch_pending,
-                        profile_id: agents.memory().profile.map(|profile| profile.id),
-                        task_id: agents.memory().task.map(|task| task.id),
-                    },
-                )?,
-            );
-        }
-        print!("\r{}\r", " ".repeat(60));
-        if answered && branch_was_pending {
-            println!(
-                "{}",
-                style(format!(
-                    "Создана ветка «{}».",
-                    agents.agents[0].active_branch
-                ))
-                .yellow()
-            );
-        }
-        for run in results {
-            match run.result {
-                Ok(answer) => {
-                    if let Some(path) = &metrics_log_path {
-                        let entry = MetricsLogEntry {
-                            timestamp_unix_ms: SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis(),
-                            session_id: active_session_id
-                                .context("успешный ответ не привязан к сессии")?,
-                            branch: &agents.agents[0].active_branch,
-                            agent_id: run.agent_id,
+        let mut request_input = automatic_input.unwrap_or(input);
+        loop {
+            print!("{} ", style("● Агент 1 · выполняется…").yellow());
+            std::io::stdout().flush()?;
+            let branch_was_pending = agents
+                .agents
+                .first()
+                .is_some_and(|agent| agent.branch_pending);
+            let mut results = agents.ask_all(&request_input).await;
+            let mut task_progress = None;
+            for run in &mut results {
+                let Ok(answer) = &mut run.result else {
+                    continue;
+                };
+                if let Some(progress) = persist_answer_task_update(&sessions, &mut agents, answer) {
+                    task_progress = Some(progress);
+                }
+            }
+            let answered = results.iter().any(|run| run.result.is_ok());
+            if answered {
+                active_session_id = Some(
+                    sessions.save(
+                        active_session_id,
+                        SessionSnapshot {
                             provider,
                             model: config.model(provider)?,
-                            elapsed_ms: run.elapsed.as_millis(),
-                            request_input_tokens: answer.input_tokens,
-                            request_output_tokens: answer.output_tokens,
-                            session_input_tokens: answer.session_input_tokens,
-                            session_output_tokens: answer.session_output_tokens,
-                        };
-                        if let Err(error) = append_metrics_log(path, &entry) {
-                            eprintln!("{} {error:#}", style("Не удалось записать метрики:").red());
+                            mode: active_mode.and_then(|index| {
+                                modes.modes.get(index).map(|mode| mode.name.as_str())
+                            }),
+                            temperature: config.temperature(provider)?,
+                            messages: agents.persisted_history(),
+                            summary: &agents.agents[0].summary,
+                            facts: &agents.agents[0].facts,
+                            summarized_count: agents.agents[0]
+                                .persisted_history
+                                .len()
+                                .saturating_sub(agents.agents[0].history.len()),
+                            compression_strategy: config.compression_strategy,
+                            context_messages: config.context_messages,
+                            branches: &agents.agents[0].branches,
+                            checkpoint: agents.agents[0].checkpoint.as_ref(),
+                            active_branch: &agents.agents[0].active_branch,
+                            branch_pending: agents.agents[0].branch_pending,
+                            profile_id: agents.memory().profile.map(|profile| profile.id),
+                            task_id: agents.memory().task.map(|task| task.id),
+                        },
+                    )?,
+                );
+            }
+            print!("\r{}\r", " ".repeat(60));
+            if answered && branch_was_pending {
+                println!(
+                    "{}",
+                    style(format!(
+                        "Создана ветка «{}».",
+                        agents.agents[0].active_branch
+                    ))
+                    .yellow()
+                );
+            }
+            for run in results {
+                match run.result {
+                    Ok(answer) => {
+                        if let Some(path) = &metrics_log_path {
+                            let entry = MetricsLogEntry {
+                                timestamp_unix_ms: SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis(),
+                                session_id: active_session_id
+                                    .context("успешный ответ не привязан к сессии")?,
+                                branch: &agents.agents[0].active_branch,
+                                agent_id: run.agent_id,
+                                provider,
+                                model: config.model(provider)?,
+                                elapsed_ms: run.elapsed.as_millis(),
+                                request_input_tokens: answer.input_tokens,
+                                request_output_tokens: answer.output_tokens,
+                                session_input_tokens: answer.session_input_tokens,
+                                session_output_tokens: answer.session_output_tokens,
+                            };
+                            if let Err(error) = append_metrics_log(path, &entry) {
+                                eprintln!(
+                                    "{} {error:#}",
+                                    style("Не удалось записать метрики:").red()
+                                );
+                            }
                         }
+                        println!(
+                            "{} {}\n{}\n",
+                            style("✓").green().bold(),
+                            style(format!("Агент {}", run.agent_id)).magenta().bold(),
+                            answer.text
+                        );
+                        if let Some(warning) = &answer.task_update_warning {
+                            eprintln!("{} {warning}", style("Предупреждение задачи:").yellow());
+                        }
+                        println!(
+                            "{}\n",
+                            style(format!(
+                                "Метрики: {:.3} с; токены — запрос: {} входных, {} выходных; сессия: {} входных, {} выходных",
+                                run.elapsed.as_secs_f64(),
+                                answer.input_tokens,
+                                answer.output_tokens,
+                                answer.session_input_tokens,
+                                answer.session_output_tokens
+                            ))
+                            .dim()
+                        );
                     }
-                    println!(
-                        "{} {}\n{}\n",
-                        style("✓").green().bold(),
-                        style(format!("Агент {}", run.agent_id)).magenta().bold(),
-                        answer.text
-                    );
-                    println!(
-                        "{}\n",
-                        style(format!(
-                            "Метрики: {:.3} с; токены — запрос: {} входных, {} выходных; сессия: {} входных, {} выходных",
-                            run.elapsed.as_secs_f64(),
-                            answer.input_tokens,
-                            answer.output_tokens,
-                            answer.session_input_tokens,
-                            answer.session_output_tokens
-                        ))
-                        .dim()
-                    );
+                    Err(err) => {
+                        eprintln!(
+                            "{} {}: {err:#}\n",
+                            style("✗").red().bold(),
+                            style(format!("Агент {}", run.agent_id)).red().bold()
+                        );
+                    }
                 }
-                Err(err) => {
-                    eprintln!(
-                        "{} {}: {err:#}\n",
-                        style("✗").red().bold(),
-                        style(format!("Агент {}", run.agent_id)).red().bold()
-                    );
+            }
+            match task_progress {
+                Some(TaskUpdateProgress::Continue(phase)) => {
+                    let Some(instruction) = task_phase_continue_instruction(phase) else {
+                        break;
+                    };
+                    request_input = instruction.to_owned();
                 }
+                Some(TaskUpdateProgress::Completed(phase)) => {
+                    if let Some(message) = task_phase_completion_message(phase) {
+                        println!("{}\n", style(message).yellow().bold());
+                    }
+                    break;
+                }
+                None => break,
             }
         }
     }
@@ -602,6 +643,72 @@ pub(crate) enum TaskCommandOutcome {
     Unchanged,
     Select(Option<Task>),
     Refresh(Task),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskUpdateProgress {
+    Continue(TaskPhase),
+    Completed(TaskPhase),
+}
+
+pub(crate) fn persist_answer_task_update(
+    store: &SessionStore,
+    agents: &mut AgentPool,
+    answer: &mut ApiAnswer,
+) -> Option<TaskUpdateProgress> {
+    let update = answer.task_update.take()?;
+    let task = agents.memory().task?;
+    let was_ready = task.ready_for_next();
+    let phase = task.phase;
+    let previous_step = task.todo.current_for(phase).map(|(_, item)| item.id);
+    match store.save_task_update_with_result(task.id, task.phase, &update, Some(&answer.text)) {
+        Ok(task) => {
+            let became_ready = !was_ready && task.ready_for_next();
+            let next_step = task.todo.current_for(phase).map(|(_, item)| item.id);
+            let advanced = matches!(phase, TaskPhase::Execution | TaskPhase::Validation)
+                && previous_step.is_some()
+                && previous_step != next_step;
+            let progress = if became_ready {
+                Some(TaskUpdateProgress::Completed(phase))
+            } else if advanced && next_step.is_some() {
+                Some(TaskUpdateProgress::Continue(phase))
+            } else {
+                None
+            };
+            let mut memory = agents.memory();
+            memory.task = Some(task);
+            agents.set_memory(memory);
+            progress
+        }
+        Err(error) => {
+            let warning = format!("TODO не обновлён: {error:#}");
+            answer.task_update_warning = Some(
+                answer
+                    .task_update_warning
+                    .take()
+                    .map_or(warning.clone(), |current| format!("{current}; {warning}")),
+            );
+            None
+        }
+    }
+}
+
+pub(crate) fn task_phase_completion_message(phase: TaskPhase) -> Option<String> {
+    phase.next().map(|next| {
+        format!("Все пункты этапа {phase} завершены. Для перехода к {next} используйте /task next.")
+    })
+}
+
+pub(crate) fn task_phase_continue_instruction(phase: TaskPhase) -> Option<&'static str> {
+    match phase {
+        TaskPhase::Execution => Some(
+            "Автоматически продолжи этап execution: выполни вычисленный текущий пункт e и сохрани его результат через TASK_UPDATE.",
+        ),
+        TaskPhase::Validation => Some(
+            "Автоматически продолжи этап validation: выполни вычисленный текущий пункт v и сохрани его результат через TASK_UPDATE.",
+        ),
+        TaskPhase::Planning | TaskPhase::Done => None,
+    }
 }
 
 pub(crate) fn activate_memory_context(
@@ -819,12 +926,13 @@ pub(crate) fn handle_task_command(
         "show" => {
             match current {
                 Some(task) => println!(
-                    "{} #{} «{}»\nФаза: {}\nTODO: {}",
+                    "{} #{} «{}»\nФаза: {}\n{}\n{}",
                     style("Активная задача:").yellow(),
                     task.id,
                     task.title,
                     task.phase,
-                    task.todo
+                    format_task_todo(&task.todo),
+                    format_task_results(task, true)
                 ),
                 None => println!("{}", style("Задача не выбрана.").dim()),
             }
@@ -836,25 +944,6 @@ pub(crate) fn handle_task_command(
             value.trim(),
         )?))),
         "new" => create_task_interactive(store),
-        "todo" => {
-            let task = current.context("сначала выберите задачу через /task")?;
-            let todo = if value.trim().is_empty() {
-                prompt_multiline("Новый краткий TODO задачи")?
-            } else {
-                value.trim().to_owned()
-            };
-            validate_memory_text(&todo, "TODO задачи", TASK_TODO_MAX_CHARS)?;
-            let confirmed = Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt("Заменить TODO активной задачи?")
-                .default(true)
-                .interact()?;
-            let Some(task) = update_task_todo_if_confirmed(store, task, &todo, confirmed)? else {
-                println!("{}", style("TODO не изменён.").dim());
-                return Ok(TaskCommandOutcome::Unchanged);
-            };
-            println!("{}", style("TODO задачи обновлён.").yellow());
-            Ok(TaskCommandOutcome::Refresh(task))
-        }
         "next" => {
             let task = current.context("сначала выберите задачу через /task")?;
             let next = task
@@ -862,7 +951,7 @@ pub(crate) fn handle_task_command(
                 .next()
                 .with_context(|| format!("задача «{}» уже завершена", task.title))?;
             let confirmed = Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt(format!("Перейти {} -> {}?", task.phase, next))
+                .with_prompt(task_transition_prompt(task, next))
                 .default(false)
                 .interact()?;
             let Some(task) = advance_task_if_confirmed(store, task, confirmed)? else {
@@ -877,7 +966,28 @@ pub(crate) fn handle_task_command(
             Ok(TaskCommandOutcome::Refresh(task))
         }
         "" => choose_task_action(store, current),
-        _ => bail!("используйте /task, /task show, /task new, /task use <id|имя>, /task todo [текст], /task next или /task off"),
+        _ => bail!("используйте /task, /task show, /task new, /task use <id|имя>, /task next или /task off"),
+    }
+}
+
+pub(crate) fn task_transition_prompt(task: &Task, next: TaskPhase) -> String {
+    format!(
+        "Перейти {} -> {}? Незавершённых пунктов текущего этапа: {}",
+        task.phase,
+        next,
+        task.todo.pending_for(task.phase)
+    )
+}
+
+pub(crate) fn task_phase_start_instruction(phase: TaskPhase) -> Option<&'static str> {
+    match phase {
+        TaskPhase::Execution => Some(
+            "Начни этап execution: выполни первый применимый незавершённый пункт e из TODO и после фактического выполнения отметь его ID через TASK_UPDATE.",
+        ),
+        TaskPhase::Validation => Some(
+            "Начни этап validation: выполни первый применимый незавершённый пункт v из TODO и после полученного результата проверки отметь его ID через TASK_UPDATE.",
+        ),
+        TaskPhase::Planning | TaskPhase::Done => None,
     }
 }
 
@@ -893,25 +1003,11 @@ pub(crate) fn advance_task_if_confirmed(
     }
 }
 
-pub(crate) fn update_task_todo_if_confirmed(
-    store: &SessionStore,
-    task: &Task,
-    todo: &str,
-    confirmed: bool,
-) -> Result<Option<Task>> {
-    if confirmed {
-        store.update_task_todo(task.id, todo).map(Some)
-    } else {
-        Ok(None)
-    }
-}
-
 fn choose_task_action(store: &SessionStore, current: Option<&Task>) -> Result<TaskCommandOutcome> {
     let actions = [
         "Просмотреть активную задачу",
         "Продолжить сохранённую задачу",
         "Создать новую задачу",
-        "Изменить TODO",
         "Перейти к следующему этапу",
         "Отключить задачу",
     ];
@@ -945,8 +1041,7 @@ fn choose_task_action(store: &SessionStore, current: Option<&Task>) -> Result<Ta
             }))
         }
         2 => create_task_interactive(store),
-        3 => handle_task_command("/task todo", store, current),
-        4 => handle_task_command("/task next", store, current),
+        3 => handle_task_command("/task next", store, current),
         _ => Ok(TaskCommandOutcome::Select(None)),
     }
 }
@@ -960,7 +1055,7 @@ fn create_task_interactive(store: &SessionStore) -> Result<TaskCommandOutcome> {
                 .map_err(|error| error.to_string())
         })
         .interact_text()?;
-    let todo = prompt_multiline("Краткий TODO задачи")?;
+    let todo = prompt_multiline("Исходное описание задачи")?;
     validate_task(&title, &todo)?;
     let confirmed = Confirm::with_theme(&ColorfulTheme::default())
         .with_prompt(format!("Создать задачу «{}»?", title.trim()))

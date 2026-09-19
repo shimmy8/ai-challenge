@@ -56,6 +56,8 @@ pub(crate) async fn send_openai(
         .unwrap_or(0);
     Ok(ApiAnswer {
         text,
+        task_update: None,
+        task_update_warning: None,
         input_tokens,
         output_tokens,
         session_input_tokens: 0,
@@ -105,6 +107,8 @@ pub(crate) async fn send_claude(
         .unwrap_or(0);
     Ok(ApiAnswer {
         text,
+        task_update: None,
+        task_update_warning: None,
         input_tokens,
         output_tokens,
         session_input_tokens: 0,

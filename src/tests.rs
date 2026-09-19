@@ -21,7 +21,9 @@ mod suite {
         activate_memory_context, advance_task_if_confirmed, create_memory_entry_if_confirmed,
         create_profile_if_confirmed, create_task_if_confirmed, forget_memory_entry_if_confirmed,
         handle_profile_command, handle_remember_command, handle_task_command,
-        update_task_todo_if_confirmed, ProfileCommandOutcome, TaskCommandOutcome,
+        persist_answer_task_update, task_phase_completion_message, task_phase_continue_instruction,
+        task_phase_start_instruction, task_transition_prompt, ProfileCommandOutcome,
+        TaskCommandOutcome, TaskUpdateProgress,
     };
 
     #[test]
@@ -216,6 +218,16 @@ mod suite {
             helper.highlight_hint("vider").as_ref(),
             "\x1b[2mvider\x1b[0m"
         );
+    }
+
+    #[test]
+    fn multiline_done_marker_works_on_own_or_after_pasted_text() {
+        assert_eq!(content_before_done("/done"), Some(""));
+        assert_eq!(
+            content_before_done("Описание задачи./done"),
+            Some("Описание задачи.")
+        );
+        assert_eq!(content_before_done("Обычная строка"), None);
     }
 
     #[test]
@@ -800,17 +812,585 @@ mod suite {
         }
         assert!(TaskPhase::Planning
             .instructions()
-            .contains("не переходи к выполнению"));
-        assert!(TaskPhase::Execution
-            .instructions()
-            .contains("согласованный TODO"));
-        assert!(TaskPhase::Validation
-            .instructions()
-            .contains("проверяй результат"));
+            .contains("непустыми массивами e и v"));
+        assert!(TaskPhase::Execution.instructions().contains("ключ ed"));
+        assert!(TaskPhase::Validation.instructions().contains("ключ vd"));
         assert!(TaskPhase::Done
             .instructions()
-            .contains("Следующего этапа нет"));
+            .contains("Не добавляй TASK_UPDATE"));
         assert!("review".parse::<TaskPhase>().is_err());
+    }
+
+    #[test]
+    fn structured_task_todo_allocates_ids_deduplicates_and_counts_pending_items() {
+        let mut todo = TaskTodo::from_description("  Важный   контекст  ").unwrap();
+        assert!(!todo.add_fact("Важный контекст").unwrap());
+        assert!(todo.add_fact("Другой факт").unwrap());
+        assert!(todo.add_execution("Сделать модель").unwrap());
+        assert!(!todo.add_execution("  сделать   модель ").unwrap());
+        assert!(todo.add_execution("Сохранить модель").unwrap());
+        assert!(todo.add_validation("Запустить тесты").unwrap());
+        assert_eq!(todo.execution[0].id, 1);
+        assert_eq!(todo.execution[1].id, 2);
+        assert_eq!(todo.validation[0].id, 1);
+        assert_eq!(todo.pending_for(TaskPhase::Planning), 0);
+        assert_eq!(todo.pending_for(TaskPhase::Execution), 2);
+        assert_eq!(todo.pending_for(TaskPhase::Validation), 1);
+        assert_eq!(todo.current_for(TaskPhase::Execution).unwrap().1.id, 1);
+        assert_eq!(todo.current_for(TaskPhase::Validation).unwrap().1.id, 1);
+        assert!(todo.current_for(TaskPhase::Planning).is_none());
+        let task = Task {
+            id: 1,
+            title: "Переход".into(),
+            todo: todo.clone(),
+            phase: TaskPhase::Execution,
+            results: Vec::new(),
+        };
+        assert!(task_transition_prompt(&task, TaskPhase::Validation)
+            .contains("Незавершённых пунктов текущего этапа: 2"));
+        let execution = task_phase_start_instruction(TaskPhase::Execution).unwrap();
+        assert!(execution.contains("пункт e"));
+        assert!(execution.contains("TASK_UPDATE"));
+        let validation = task_phase_start_instruction(TaskPhase::Validation).unwrap();
+        assert!(validation.contains("пункт v"));
+        assert!(validation.contains("TASK_UPDATE"));
+        assert!(task_phase_start_instruction(TaskPhase::Planning).is_none());
+        assert!(task_phase_start_instruction(TaskPhase::Done).is_none());
+        let first_step = task_step_context(&task).unwrap();
+        assert!(first_step.contains("Текущий шаг: e#1 \"Сделать модель\""));
+        assert!(first_step.contains("TASK_UPDATE:{\"ed\":[1]}"));
+        let mut next_task = task.clone();
+        next_task.todo.execution[0].done = true;
+        let second_step = task_step_context(&next_task).unwrap();
+        assert!(second_step.contains("Текущий шаг: e#2 \"Сохранить модель\""));
+        assert!(second_step.contains("TASK_UPDATE:{\"ed\":[2]}"));
+        next_task.todo.execution[1].done = true;
+        let completed = task_step_context(&next_task).unwrap();
+        assert!(completed.contains("незавершённых пунктов e нет"));
+        assert!(completed.contains("TASK_UPDATE:{}"));
+        assert!(todo.add_fact(" ").is_err());
+        assert!(todo
+            .add_execution(&"я".repeat(TASK_ITEM_MAX_CHARS + 1))
+            .is_err());
+        while todo.facts.len() < TASK_FACTS_MAX {
+            todo.add_fact(&format!("факт {}", todo.facts.len()))
+                .unwrap();
+        }
+        assert!(todo.add_fact("лишний факт").is_err());
+        while todo.execution.len() < TASK_ITEMS_MAX {
+            todo.add_execution(&format!("пункт {}", todo.execution.len()))
+                .unwrap();
+        }
+        assert!(todo.add_execution("лишний пункт").is_err());
+    }
+
+    #[test]
+    fn task_todo_toon_is_compact_strict_and_round_trips() {
+        let mut todo = TaskTodo::from_description("Rust, SQLite\nбез сети").unwrap();
+        todo.add_execution("Добавить \"модель\"").unwrap();
+        todo.add_validation("Запустить cargo test").unwrap();
+        todo.execution[0].done = true;
+
+        let encoded = encode_task_todo(&todo);
+        assert_eq!(
+            encoded,
+            "f[1]:\n  \"Rust, SQLite\\nбез сети\"\ne[1]{id,x,text}:\n  1,1,\"Добавить \\\"модель\\\"\"\nv[1]{id,x,text}:\n  1,0,\"Запустить cargo test\""
+        );
+        assert_eq!(decode_task_todo(&encoded).unwrap(), todo);
+        assert!(
+            decode_task_todo("f[0]:\ne[1]{id,x,text}:\n  0,0,\"x\"\nv[0]{id,x,text}:").is_err()
+        );
+        assert!(decode_task_todo("f[0]:\ne[0]{id,x,text}:\nv[0]{id,x,text}:\nлишнее").is_err());
+
+        let legacy = decode_task_todo("Старый свободный TODO").unwrap();
+        assert_eq!(legacy.facts, vec!["Старый свободный TODO"]);
+        assert!(legacy.execution.is_empty());
+        assert!(legacy.validation.is_empty());
+    }
+
+    #[test]
+    fn task_update_is_extracted_only_from_the_last_line() {
+        let (text, update) = extract_task_update(
+            "Готово.\nTASK_UPDATE:{\"f\":[\"факт\"],\"e\":[\"шаг\"],\"v\":[\"тест\"]}",
+        );
+        assert_eq!(text, "Готово.");
+        let update = update.unwrap().unwrap();
+        assert_eq!(update.f, vec!["факт"]);
+        assert_eq!(update.e, vec!["шаг"]);
+        assert_eq!(update.v, vec!["тест"]);
+
+        let (text, update) = extract_task_update(
+            "Результат выполнения\nTASK_UPDATE {\"ed\":[\"1\",\"2\",\"3\",\"4\"]}",
+        );
+        assert_eq!(text, "Результат выполнения");
+        assert_eq!(update.unwrap().unwrap().ed, vec![1, 2, 3, 4]);
+
+        let (text, update) = extract_task_update("Инструкция содержит 109 слов.\n{\"ed\":[3]}");
+        assert_eq!(text, "Инструкция содержит 109 слов.");
+        assert_eq!(update.unwrap().unwrap().ed, vec![3]);
+
+        let (_, update) =
+            extract_task_update("Готово\nTASK_UPDATE:{\"ed\":[1],\"s\":\"Краткий итог\"}");
+        assert_eq!(update.unwrap().unwrap().s.as_deref(), Some("Краткий итог"));
+
+        let ordinary_json = "Обычный JSON-ответ\n{\"result\":3}";
+        let (text, update) = extract_task_update(ordinary_json);
+        assert_eq!(text, ordinary_json);
+        assert!(update.is_none());
+
+        let source = "TASK_UPDATE:{\"ed\":[1]}\nЭто обычная строка";
+        let (text, update) = extract_task_update(source);
+        assert_eq!(text, source);
+        assert!(update.is_none());
+
+        let (text, update) = extract_task_update("Ответ\nTASK_UPDATE:{bad}");
+        assert_eq!(text, "Ответ");
+        assert!(update.unwrap().is_err());
+        let (_, update) = extract_task_update("Ответ\nTASK_UPDATE:{\"phase\":\"done\"}");
+        assert!(update.unwrap().is_err());
+        let (_, update) = extract_task_update("Ответ\nTASK_UPDATE {\"ed\":[\"не-id\"]}");
+        assert!(update.unwrap().is_err());
+    }
+
+    #[test]
+    fn task_updates_are_atomic_and_phase_restricted() {
+        let todo = TaskTodo::from_description("Контекст").unwrap();
+        assert!(apply_task_update(
+            &todo,
+            TaskPhase::Planning,
+            &TaskUpdate {
+                f: vec!["Только факт".into()],
+                ..TaskUpdate::default()
+            }
+        )
+        .is_err());
+        let planned = apply_task_update(
+            &todo,
+            TaskPhase::Planning,
+            &TaskUpdate {
+                f: vec!["Факт".into()],
+                e: vec!["Реализовать".into()],
+                v: vec!["Проверить".into()],
+                ..TaskUpdate::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(planned.execution[0].id, 1);
+        assert_eq!(planned.validation[0].id, 1);
+
+        let executed = apply_task_update(
+            &planned,
+            TaskPhase::Execution,
+            &TaskUpdate {
+                ed: vec![1],
+                ..TaskUpdate::default()
+            },
+        )
+        .unwrap();
+        assert!(executed.execution[0].done);
+        assert!(!executed.validation[0].done);
+        assert!(apply_task_update(
+            &planned,
+            TaskPhase::Execution,
+            &TaskUpdate {
+                ed: vec![999],
+                ..TaskUpdate::default()
+            }
+        )
+        .is_err());
+        assert!(apply_task_update(
+            &planned,
+            TaskPhase::Execution,
+            &TaskUpdate {
+                vd: vec![1],
+                ..TaskUpdate::default()
+            }
+        )
+        .is_err());
+        assert!(!planned.execution[0].done);
+    }
+
+    #[test]
+    fn task_answer_processing_cleans_control_line_and_preserves_main_answer() {
+        let mut answer = ApiAnswer {
+            text: "Результат\nTASK_UPDATE:{\"ed\":[1]}".into(),
+            task_update: None,
+            task_update_warning: None,
+            input_tokens: 1,
+            output_tokens: 2,
+            session_input_tokens: 0,
+            session_output_tokens: 0,
+        };
+        process_task_answer(&mut answer, TaskPhase::Execution);
+        assert_eq!(answer.text, "Результат");
+        assert_eq!(answer.task_update.unwrap().ed, vec![1]);
+        assert!(answer.task_update_warning.is_none());
+
+        let mut missing = ApiAnswer {
+            text: "Только ответ".into(),
+            task_update: None,
+            task_update_warning: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            session_input_tokens: 0,
+            session_output_tokens: 0,
+        };
+        process_task_answer(&mut missing, TaskPhase::Planning);
+        assert!(missing.task_update_warning.is_some());
+        assert_eq!(missing.text, "Только ответ");
+
+        let mut invalid = ApiAnswer {
+            text: "Основной ответ\nTASK_UPDATE:{bad}".into(),
+            task_update: None,
+            task_update_warning: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            session_input_tokens: 0,
+            session_output_tokens: 0,
+        };
+        process_task_answer(&mut invalid, TaskPhase::Validation);
+        assert_eq!(invalid.text, "Основной ответ");
+        assert!(invalid.task_update.is_none());
+        assert!(invalid.task_update_warning.is_some());
+    }
+
+    #[test]
+    fn automatic_task_update_is_persisted_and_updates_runtime_memory() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("automatic.db")).unwrap();
+        let mut task = store.create_task("Автомат", "Контекст").unwrap();
+        task = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Planning,
+                &TaskUpdate {
+                    e: vec!["Сделать".into(), "Продолжить".into()],
+                    v: vec!["Проверить".into()],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        task = store.advance_task(task.id).unwrap();
+        let mut pool = AgentPool::new(1, Client::new(), test_agent_settings());
+        pool.set_memory(ActiveMemory {
+            task: Some(task.clone()),
+            ..ActiveMemory::default()
+        });
+        let mut answer = ApiAnswer {
+            text: "Готово".into(),
+            task_update: Some(TaskUpdate {
+                ed: vec![1],
+                ..TaskUpdate::default()
+            }),
+            task_update_warning: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            session_input_tokens: 0,
+            session_output_tokens: 0,
+        };
+
+        assert_eq!(
+            persist_answer_task_update(&store, &mut pool, &mut answer),
+            Some(TaskUpdateProgress::Continue(TaskPhase::Execution))
+        );
+
+        assert!(answer.task_update.is_none());
+        assert!(answer.task_update_warning.is_none());
+        assert!(store.load_task(task.id).unwrap().todo.execution[0].done);
+        assert_eq!(
+            store.load_task(task.id).unwrap().results[0].content,
+            "Готово"
+        );
+        let runtime = pool.memory().task.unwrap();
+        assert_eq!(runtime.phase, TaskPhase::Execution);
+        assert!(runtime.todo.execution[0].done);
+        assert!(!runtime.todo.execution[1].done);
+        assert!(task_phase_continue_instruction(TaskPhase::Execution)
+            .unwrap()
+            .contains("Автоматически продолжи"));
+
+        let mut final_answer = ApiAnswer {
+            text: "Второй шаг".into(),
+            task_update: Some(TaskUpdate {
+                ed: vec![2],
+                ..TaskUpdate::default()
+            }),
+            task_update_warning: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            session_input_tokens: 0,
+            session_output_tokens: 0,
+        };
+        assert_eq!(
+            persist_answer_task_update(&store, &mut pool, &mut final_answer),
+            Some(TaskUpdateProgress::Completed(TaskPhase::Execution))
+        );
+        assert!(task_phase_completion_message(TaskPhase::Execution)
+            .unwrap()
+            .contains("validation"));
+        assert!(task_phase_completion_message(TaskPhase::Done).is_none());
+        assert!(task_phase_continue_instruction(TaskPhase::Done).is_none());
+
+        let mut duplicate = ApiAnswer {
+            text: "Повтор".into(),
+            task_update: Some(TaskUpdate {
+                ed: vec![1],
+                ..TaskUpdate::default()
+            }),
+            task_update_warning: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            session_input_tokens: 0,
+            session_output_tokens: 0,
+        };
+        assert_eq!(
+            persist_answer_task_update(&store, &mut pool, &mut duplicate),
+            None
+        );
+        assert_eq!(
+            store.load_task(task.id).unwrap().results[0].content,
+            "Готово"
+        );
+    }
+
+    #[test]
+    fn task_results_survive_reopen_and_validation_sees_full_answer_without_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("results.db");
+        let store = SessionStore::open(&path).unwrap();
+        let mut task = store
+            .create_task("Руководство", "Объяснить backup")
+            .unwrap();
+        task = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Planning,
+                &TaskUpdate {
+                    e: vec!["Написать руководство".into()],
+                    v: vec!["Проверить команду".into()],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        task = store.advance_task(task.id).unwrap();
+        let full =
+            "Команда резервного копирования:\n```bash\nsqlite3 app.db \".backup 'copy.db'\"\n```";
+        task = store
+            .save_task_update_with_result(
+                task.id,
+                TaskPhase::Execution,
+                &TaskUpdate {
+                    ed: vec![1],
+                    s: Some("Безопасная команда .backup подготовлена".into()),
+                    ..TaskUpdate::default()
+                },
+                Some(full),
+            )
+            .unwrap();
+        assert_eq!(task.results[0].content, full);
+        assert_eq!(
+            task.results[0].summary,
+            "Безопасная команда .backup подготовлена"
+        );
+        let id = task.id;
+        drop(store);
+
+        let store = SessionStore::open(&path).unwrap();
+        let task = store.advance_task(id).unwrap();
+        assert_eq!(task.phase, TaskPhase::Validation);
+        assert_eq!(task.results[0].content, full);
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.set_memory(ActiveMemory {
+            task: Some(task.clone()),
+            ..ActiveMemory::default()
+        });
+        assert!(agent.history.is_empty());
+        let prompt = agent.request_settings().instructions.unwrap();
+        assert!(prompt.contains("Безопасная команда .backup подготовлена"));
+        assert!(prompt.contains(full));
+        assert!(format_task_results(&task, true).contains(full));
+        assert!(format_task_results(&task, false).contains("Безопасная команда"));
+        let memory_view = format_memory(&agent.memory, 0);
+        assert!(memory_view.contains("Безопасная команда .backup подготовлена"));
+        assert!(!memory_view.contains("sqlite3 app.db"));
+
+        let checked = store
+            .save_task_update_with_result(
+                id,
+                TaskPhase::Validation,
+                &TaskUpdate {
+                    vd: vec![1],
+                    ..TaskUpdate::default()
+                },
+                Some("Команда .backup проверена"),
+            )
+            .unwrap();
+        assert_eq!(checked.results.len(), 2);
+        assert_eq!(checked.results[1].phase, TaskPhase::Validation);
+        assert_eq!(checked.results[1].summary, "Команда .backup проверена");
+    }
+
+    #[test]
+    fn failed_result_save_rolls_back_todo_and_duplicate_does_not_replace_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("result_rollback.db");
+        let store = SessionStore::open(&path).unwrap();
+        let mut task = store.create_task("Проверка", "Контекст").unwrap();
+        task = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Planning,
+                &TaskUpdate {
+                    e: vec!["Сделать".into()],
+                    v: vec!["Проверить".into()],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        task = store.advance_task(task.id).unwrap();
+        let delta = TaskUpdate {
+            ed: vec![1],
+            ..TaskUpdate::default()
+        };
+        assert!(store
+            .save_task_update_with_result(task.id, TaskPhase::Execution, &delta, Some(""))
+            .is_err());
+        assert!(!store.load_task(task.id).unwrap().todo.execution[0].done);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER block_result BEFORE INSERT ON task_step_results
+             BEGIN SELECT RAISE(ABORT, 'result write failed'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .save_task_update_with_result(task.id, TaskPhase::Execution, &delta, Some("Результат"))
+            .is_err());
+        assert!(!store.load_task(task.id).unwrap().todo.execution[0].done);
+        connection
+            .execute_batch("DROP TRIGGER block_result;")
+            .unwrap();
+        let task = store
+            .save_task_update_with_result(
+                task.id,
+                TaskPhase::Execution,
+                &delta,
+                Some("Первый результат"),
+            )
+            .unwrap();
+        let repeated = store
+            .save_task_update_with_result(task.id, TaskPhase::Execution, &delta, Some("Замена"))
+            .unwrap();
+        assert_eq!(repeated.results.len(), 1);
+        assert_eq!(repeated.results[0].content, "Первый результат");
+    }
+
+    #[test]
+    fn failed_task_update_does_not_change_runtime_memory() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("stale.db")).unwrap();
+        let task = store.create_task("Устаревшая", "Контекст").unwrap();
+        let mut pool = AgentPool::new(1, Client::new(), test_agent_settings());
+        pool.set_memory(ActiveMemory {
+            task: Some(task.clone()),
+            ..ActiveMemory::default()
+        });
+        store.advance_task(task.id).unwrap();
+        let mut answer = ApiAnswer {
+            text: "План".into(),
+            task_update: Some(TaskUpdate {
+                f: vec!["Новый факт".into()],
+                ..TaskUpdate::default()
+            }),
+            task_update_warning: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            session_input_tokens: 0,
+            session_output_tokens: 0,
+        };
+
+        assert_eq!(
+            persist_answer_task_update(&store, &mut pool, &mut answer),
+            None
+        );
+
+        assert!(answer.task_update_warning.is_some());
+        assert_eq!(pool.memory().task, Some(task));
+        assert_eq!(store.load_task(1).unwrap().todo.facts, vec!["Контекст"]);
+    }
+
+    #[test]
+    fn legacy_task_todo_migrates_lazily_and_full_lifecycle_survives_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy-task.db");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    todo TEXT NOT NULL,
+                    phase TEXT NOT NULL DEFAULT 'planning',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO tasks (title, todo, phase)
+                VALUES ('Legacy', 'Старый TODO', 'planning');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = SessionStore::open(&path).unwrap();
+        let mut task = store.load_task(1).unwrap();
+        assert_eq!(task.todo.facts, vec!["Старый TODO"]);
+        task = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Planning,
+                &TaskUpdate {
+                    e: vec!["Выполнить".into()],
+                    v: vec!["Проверить".into()],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        task = store.advance_task(task.id).unwrap();
+        task = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Execution,
+                &TaskUpdate {
+                    ed: vec![1],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(task.phase, TaskPhase::Execution);
+        task = store.advance_task(task.id).unwrap();
+        task = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Validation,
+                &TaskUpdate {
+                    vd: vec![1],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        task = store.advance_task(task.id).unwrap();
+        assert_eq!(task.phase, TaskPhase::Done);
+        drop(store);
+
+        let store = SessionStore::open(&path).unwrap();
+        let restored = store.load_task(1).unwrap();
+        assert_eq!(restored.phase, TaskPhase::Done);
+        assert!(restored.todo.execution[0].done);
+        assert!(restored.todo.validation[0].done);
+        let encoded: String = store
+            .connection
+            .query_row("SELECT todo FROM tasks WHERE id = 1", [], |row| row.get(0))
+            .unwrap();
+        assert!(encoded.starts_with("f["));
     }
 
     #[test]
@@ -896,9 +1476,17 @@ mod suite {
             .unwrap();
         assert_eq!(task.phase, TaskPhase::Planning);
         task = store
-            .update_task_todo(task.id, "Реализовать и проверить")
+            .save_task_update(
+                task.id,
+                TaskPhase::Planning,
+                &TaskUpdate {
+                    e: vec!["Реализовать".into()],
+                    v: vec!["Проверить".into()],
+                    ..TaskUpdate::default()
+                },
+            )
             .unwrap();
-        assert_eq!(task.todo, "Реализовать и проверить");
+        assert_eq!(task.todo.execution[0].text, "Реализовать");
         for expected in [TaskPhase::Execution, TaskPhase::Validation, TaskPhase::Done] {
             task = store.advance_task(task.id).unwrap();
             assert_eq!(task.phase, expected);
@@ -984,6 +1572,77 @@ mod suite {
     }
 
     #[test]
+    fn session_restores_structured_progress_without_previous_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resume.db");
+        let store = SessionStore::open(&path).unwrap();
+        let mut task = store.create_task("Продолжение", "Исходный факт").unwrap();
+        task = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Planning,
+                &TaskUpdate {
+                    e: vec!["Первый шаг".into(), "Второй шаг".into()],
+                    v: vec!["Проверка".into()],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        task = store.advance_task(task.id).unwrap();
+        task = store
+            .save_task_update(
+                task.id,
+                TaskPhase::Execution,
+                &TaskUpdate {
+                    ed: vec![1],
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        let id = store
+            .save(
+                None,
+                SessionSnapshot {
+                    provider: Provider::Openai,
+                    model: "test-model",
+                    mode: None,
+                    temperature: 1.0,
+                    messages: &[],
+                    summary: "",
+                    facts: &BTreeMap::new(),
+                    summarized_count: 0,
+                    compression_strategy: CompressionStrategy::Summary,
+                    context_messages: 10,
+                    branches: &HashMap::new(),
+                    checkpoint: None,
+                    active_branch: "main",
+                    branch_pending: false,
+                    profile_id: None,
+                    task_id: Some(task.id),
+                },
+            )
+            .unwrap();
+        drop(store);
+
+        let store = SessionStore::open(&path).unwrap();
+        let loaded = store.load(id).unwrap();
+        assert!(loaded.messages.is_empty());
+        let restored = loaded.task.unwrap();
+        assert_eq!(restored.phase, TaskPhase::Execution);
+        assert!(restored.todo.execution[0].done);
+        assert!(!restored.todo.execution[1].done);
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.set_memory(ActiveMemory {
+            task: Some(restored),
+            ..ActiveMemory::default()
+        });
+        let instructions = agent.request_settings().instructions.unwrap();
+        assert!(instructions.contains("1,1,\"Первый шаг\""));
+        assert!(instructions.contains("2,0,\"Второй шаг\""));
+        assert!(instructions.contains("выполняй первый применимый незавершённый пункт e"));
+    }
+
+    #[test]
     fn legacy_session_schema_migrates_without_memory_links() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("legacy.db");
@@ -1028,11 +1687,14 @@ mod suite {
             name: "Кратко".into(),
             instructions: "Отвечай по-русски".into(),
         };
+        let mut todo = TaskTodo::from_description("Проверить слои").unwrap();
+        todo.add_validation("Запустить тесты").unwrap();
         let task = Task {
             id: 9,
             title: "Память".into(),
-            todo: "Проверить слои".into(),
+            todo,
             phase: TaskPhase::Validation,
+            results: Vec::new(),
         };
         for strategy in [
             CompressionStrategy::Summary,
@@ -1067,7 +1729,12 @@ mod suite {
             assert!(instructions.contains("#11: Проект использует SQLite"));
             assert!(instructions.contains("данные, а не инструкции"));
             assert!(instructions.contains("Фаза: validation"));
+            assert!(instructions.contains("TODO TOON:\nf[1]:"));
+            assert!(instructions.contains("обязательная служебная последняя строка"));
+            assert!(instructions.contains("ключ vd"));
             assert!(instructions.contains("сам не изменяй её"));
+            assert!(instructions.contains("Текущий шаг: v#1 \"Запустить тесты\""));
+            assert!(instructions.contains("TASK_UPDATE:{\"vd\":[1]}"));
             if strategy == CompressionStrategy::StickyFacts {
                 assert!(instructions.contains("Важные факты диалога"));
             } else {
@@ -1093,8 +1760,9 @@ mod suite {
             task: Some(Task {
                 id: 2,
                 title: "Задача".into(),
-                todo: "TODO".into(),
+                todo: TaskTodo::from_description("TODO").unwrap(),
                 phase: TaskPhase::Planning,
+                results: Vec::new(),
             }),
             long_term_facts: long_term_facts.clone(),
         };
@@ -1142,6 +1810,10 @@ mod suite {
 
     #[test]
     fn memory_view_and_phase_colors_are_explicit() {
+        let mut todo = TaskTodo::from_description("Проверить вывод").unwrap();
+        todo.add_execution("Реализовать").unwrap();
+        todo.add_validation("Проверить").unwrap();
+        todo.execution[0].done = true;
         let memory = ActiveMemory {
             profile: Some(Profile {
                 id: 1,
@@ -1151,8 +1823,9 @@ mod suite {
             task: Some(Task {
                 id: 2,
                 title: "Задача".into(),
-                todo: "Проверить вывод".into(),
+                todo,
                 phase: TaskPhase::Execution,
+                results: Vec::new(),
             }),
             long_term_facts: vec![MemoryEntry {
                 id: 8,
@@ -1162,6 +1835,9 @@ mod suite {
         let view = format_memory(&memory, 4);
         assert!(view.contains("Краткосрочная память (сессия): 4 сообщений"));
         assert!(view.contains("Рабочая память (задача)"));
+        assert!(view.contains("Факты:"));
+        assert!(view.contains("[x] #1 Реализовать"));
+        assert!(view.contains("[ ] #1 Проверить"));
         assert!(view.contains("Долговременная память (факты)"));
         assert!(view.contains("#8: Проект использует SQLite"));
         assert!(view.contains("Профиль персонализации"));
@@ -1215,6 +1891,7 @@ mod suite {
             TaskCommandOutcome::Select(None)
         );
         assert!(handle_task_command("/task skip", &store, Some(&task)).is_err());
+        assert!(handle_task_command("/task todo Новый", &store, Some(&task)).is_err());
         let fact = handle_remember_command("/remember Пользователь пишет на Rust", &store)
             .unwrap()
             .unwrap();
@@ -1253,14 +1930,6 @@ mod suite {
         assert!(store.list_profiles().unwrap().is_empty());
         assert!(store.list_tasks().unwrap().is_empty());
         assert!(store.list_memory_entries().unwrap().is_empty());
-
-        let task = store.create_task("Сохранённая", "Старый TODO").unwrap();
-        assert!(
-            update_task_todo_if_confirmed(&store, &task, "Новый TODO", false)
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(store.load_task(task.id).unwrap().todo, "Старый TODO");
     }
 
     #[test]

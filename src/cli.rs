@@ -1,5 +1,12 @@
 #![allow(unused_imports)]
-use crate::{agent::*, config::*, model::*, providers::*, sessions::*};
+use crate::{
+    agent::*,
+    config::*,
+    memory::{format_task_results, format_task_todo},
+    model::*,
+    providers::*,
+    sessions::*,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use console::{style, Key, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect, Input, Select};
@@ -289,8 +296,12 @@ pub(crate) fn format_memory(memory: &ActiveMemory, message_count: usize) -> Stri
         || "не выбрана".to_owned(),
         |task| {
             format!(
-                "#{} «{}»\nФаза: {}\nTODO: {}",
-                task.id, task.title, task.phase, task.todo
+                "#{} «{}»\nФаза: {}\n{}\n{}",
+                task.id,
+                task.title,
+                task.phase,
+                format_task_todo(&task.todo),
+                format_task_results(task, false)
             )
         },
     );
@@ -801,12 +812,19 @@ pub(crate) fn prompt_multiline(prompt: &str) -> Result<String> {
             bail!("ввод инструкций прерван");
         }
         let line = line.trim_end_matches(['\r', '\n']);
-        if line == "/done" {
+        if let Some(content) = content_before_done(line) {
+            if !content.is_empty() {
+                lines.push(content.to_owned());
+            }
             break;
         }
         lines.push(line.to_owned());
     }
     Ok(lines.join("\n").trim().to_owned())
+}
+
+pub(crate) fn content_before_done(line: &str) -> Option<&str> {
+    line.strip_suffix("/done").map(str::trim_end)
 }
 
 pub(crate) fn choose_provider() -> Result<Provider> {
