@@ -100,6 +100,22 @@ mod suite {
     }
 
     #[test]
+    fn parses_startup_modes_without_ambiguity() {
+        assert_eq!(
+            parse_startup_mode(Vec::<String>::new()).unwrap(),
+            StartupMode::Interactive {
+                dump_metrics: false
+            }
+        );
+        assert_eq!(
+            parse_startup_mode(vec!["--mcp-server".into()]).unwrap(),
+            StartupMode::McpServer
+        );
+        assert!(parse_startup_mode(vec!["--dump-metrics".into(), "--mcp-server".into()]).is_err());
+        assert!(parse_startup_mode(vec!["--mcp-server".into(), "--mcp-server".into()]).is_err());
+    }
+
+    #[test]
     pub(crate) fn appends_json_metrics_log() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("metrics.log");
@@ -154,6 +170,39 @@ mod suite {
         assert_eq!(loaded.last_mode.as_deref(), Some("Кратко"));
         assert_eq!(loaded.temperature(Provider::Claude).unwrap(), 0.7);
         assert_eq!(loaded.temperature(Provider::Openai).unwrap(), 1.0);
+    }
+
+    #[test]
+    fn mcp_config_round_trip_and_old_config_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_path = dir.path().join("old-config.json");
+        fs::write(
+            &old_path,
+            serde_json::to_vec(&json!({
+                "last_provider": "openai",
+                "last_mode": null,
+                "providers": [{
+                    "provider": "openai",
+                    "api_key": null,
+                    "model": "gpt-test"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let old = Config::load(&old_path).unwrap();
+        assert_eq!(old.mcp, McpConfig::default());
+
+        let path = dir.path().join("mcp-config.json");
+        let config = Config {
+            mcp: McpConfig {
+                server_url: Some("http://127.0.0.1:8000/mcp".into()),
+                enabled_tools: vec!["echo".into()],
+            },
+            ..Config::default()
+        };
+        config.save(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap().mcp, config.mcp);
     }
 
     #[test]
