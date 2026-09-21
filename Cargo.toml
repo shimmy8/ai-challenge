@@ -7,14 +7,25 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 console = "0.15"
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rmcp = { version = "3.4", default-features = false, features = [
+    "client",
+    "server",
+    "macros",
+    "schemars",
+    "reqwest",
+    "transport-streamable-http-client-reqwest",
+    "transport-streamable-http-server",
+] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustyline = "17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+schemars = "1.2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
 webbrowser = "1"
 
 [dev-dependencies]

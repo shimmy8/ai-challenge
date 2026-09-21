@@ -37,6 +37,7 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("/mode", "выбрать или создать режим ответа"),
     ("/compression", "выбрать стратегию управления контекстом"),
     ("/temperature", "изменить температуру ответов"),
+    ("/mcp", "подключить MCP-сервер и выбрать инструменты"),
     ("/profile", "выбрать профиль персонализации"),
     ("/task", "управлять текущей задачей"),
     ("/remember", "сохранить долговременный факт"),
@@ -123,6 +124,16 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) last_mode: Option<String>,
     pub(crate) providers: Vec<ProviderConfig>,
+    #[serde(default)]
+    pub(crate) mcp: McpConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct McpConfig {
+    #[serde(default)]
+    pub(crate) server_url: Option<String>,
+    #[serde(default)]
+    pub(crate) enabled_tools: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -174,6 +185,7 @@ impl Default for Config {
             context_messages: default_context_messages(),
             last_provider: None,
             last_mode: None,
+            mcp: McpConfig::default(),
             providers: vec![
                 ProviderConfig {
                     provider: Provider::Openai,
@@ -214,6 +226,7 @@ impl Config {
             context_messages: default_context_messages(),
             last_provider: legacy.last_provider,
             last_mode: None,
+            mcp: McpConfig::default(),
             providers: vec![
                 ProviderConfig {
                     provider: Provider::Openai,

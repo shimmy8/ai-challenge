@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 use crate::{
-    agent::*, cli::*, config::*, memory::*, metrics::*, model::*, providers::*, sessions::*,
+    agent::*, cli::*, config::*, mcp::*, memory::*, metrics::*, model::*, providers::*, sessions::*,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use console::{style, Key, Term};
@@ -23,7 +23,13 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 pub(crate) async fn run() -> Result<()> {
-    let dump_metrics = parse_dump_metrics_flag(std::env::args().skip(1))?;
+    let startup_mode = parse_startup_mode(std::env::args().skip(1))?;
+    if startup_mode == StartupMode::McpServer {
+        return run_mcp_server().await;
+    }
+    let StartupMode::Interactive { dump_metrics } = startup_mode else {
+        unreachable!();
+    };
     print_banner();
     let config_path = config_path()?;
     let mut config = Config::load(&config_path)?;
@@ -336,6 +342,12 @@ pub(crate) async fn run() -> Result<()> {
                     style(format_temperature(temperature)).cyan().bold(),
                     style("Начата новая сессия.").dim()
                 );
+                continue;
+            }
+            "/mcp" => {
+                if let Err(error) = handle_mcp_command(&mut config, &config_path).await {
+                    eprintln!("{} {error:#}", style("Команда MCP не выполнена:").red());
+                }
                 continue;
             }
             command if command == "/profile" || command.starts_with("/profile ") => {
