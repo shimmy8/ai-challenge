@@ -5,3 +5,9 @@
 .fox-sessions.db-shm
 .fox-sessions.db-wal
 fox-metrics.log
+mcp.log
+.env
+.env.*
+.env-mcp
+.env-mcp.*
+!.env-mcp.example

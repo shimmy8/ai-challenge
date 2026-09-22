@@ -4,23 +4,20 @@ use anyhow::{anyhow, bail, Context, Result};
 use console::style;
 use dialoguer::{theme::ColorfulTheme, Input, MultiSelect, Select};
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolRequestParams, Tool},
-    tool, tool_handler, tool_router,
     transport::{
-        streamable_http_client::StreamableHttpClientTransportConfig,
-        streamable_http_server::{
-            session::local::LocalSessionManager, tower::StreamableHttpService,
-            StreamableHttpServerConfig,
-        },
-        StreamableHttpClientTransport,
+        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
     },
-    ServerHandler, ServiceExt,
+    ServiceExt,
 };
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use std::path::Path;
-use tokio::net::TcpListener;
+
+mod calendar;
+mod server;
+mod tools;
+pub(crate) use calendar::load_mcp_env_file;
+pub(crate) use server::{run_mcp_server, serve_mcp_listener};
+pub(crate) use tools::*;
 
 pub(crate) const MCP_SERVER_ADDR: &str = "127.0.0.1:8000";
 pub(crate) const MCP_SERVER_URL: &str = "http://127.0.0.1:8000/mcp";
@@ -29,6 +26,9 @@ pub(crate) const MCP_SERVER_URL: &str = "http://127.0.0.1:8000/mcp";
 pub(crate) struct McpToolInfo {
     pub(crate) name: String,
     pub(crate) description: Option<String>,
+    pub(crate) input_schema: serde_json::Value,
+    pub(crate) read_only: bool,
+    pub(crate) destructive: bool,
 }
 
 pub(crate) fn validate_mcp_url(value: &str) -> Result<String> {
@@ -49,23 +49,115 @@ pub(crate) async fn fetch_tools(url: &str) -> Result<Vec<McpToolInfo>> {
 }
 
 async fn fetch_tools_inner(url: &str) -> Result<Vec<McpToolInfo>> {
-    let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(url.to_owned()),
-    );
-    let client = ().serve(transport).await.context("MCP handshake не выполнен")?;
-    let result = client
-        .list_all_tools()
-        .await
-        .context("MCP-сервер не вернул список инструментов")?;
-    let tools = result
-        .into_iter()
-        .map(|tool| McpToolInfo {
-            name: tool.name.to_string(),
-            description: tool.description.map(|value| value.to_string()),
-        })
-        .collect();
-    let _ = client.cancel().await;
+    let session = McpSession::connect(url).await?;
+    let tools = session.tools.clone();
+    session.close().await;
     Ok(tools)
+}
+
+pub(crate) struct McpSession {
+    client: rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    pub(crate) tools: Vec<McpToolInfo>,
+}
+
+pub(crate) struct McpRuntime {
+    session: McpSession,
+    definitions: Vec<ToolDefinition>,
+}
+
+impl McpRuntime {
+    pub(crate) async fn connect(url: &str, enabled: &[String]) -> Result<Self> {
+        let session = McpSession::connect(url).await?;
+        let definitions = enabled_tool_definitions(&session.tools, enabled);
+        Ok(Self {
+            session,
+            definitions,
+        })
+    }
+}
+
+impl ToolExecutor for McpRuntime {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        self.definitions.clone()
+    }
+
+    fn execute<'a>(&'a self, call: &'a ToolCall) -> ToolFuture<'a> {
+        Box::pin(async move {
+            if !self
+                .definitions
+                .iter()
+                .any(|definition| definition.name == call.name)
+            {
+                bail!("MCP-инструмент «{}» не разрешён", call.name);
+            }
+            self.session.call(call).await
+        })
+    }
+}
+
+impl McpSession {
+    pub(crate) async fn connect(url: &str) -> Result<Self> {
+        let url = validate_mcp_url(url)?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+            let transport = StreamableHttpClientTransport::from_config(
+                StreamableHttpClientTransportConfig::with_uri(url),
+            );
+            let client = ().serve(transport).await.context("MCP handshake не выполнен")?;
+            let result = client
+                .list_all_tools()
+                .await
+                .context("MCP-сервер не вернул список инструментов")?;
+            let tools = result
+                .into_iter()
+                .map(|tool| McpToolInfo {
+                    name: tool.name.to_string(),
+                    description: tool.description.map(|value| value.to_string()),
+                    input_schema: serde_json::Value::Object((*tool.input_schema).clone()),
+                    read_only: tool
+                        .annotations
+                        .as_ref()
+                        .and_then(|annotations| annotations.read_only_hint)
+                        .unwrap_or(false),
+                    destructive: tool
+                        .annotations
+                        .as_ref()
+                        .and_then(|annotations| annotations.destructive_hint)
+                        .unwrap_or(false),
+                })
+                .collect();
+            Ok(Self { client, tools })
+        })
+        .await
+        .map_err(|_| anyhow!("истекло время ожидания MCP-сервера"))?
+    }
+
+    pub(crate) async fn call(&self, call: &ToolCall) -> Result<ToolResult> {
+        let arguments = call
+            .arguments
+            .as_object()
+            .cloned()
+            .ok_or_else(|| anyhow!("аргументы MCP-инструмента должны быть JSON-объектом"))?;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.client
+                .call_tool(CallToolRequestParams::new(call.name.clone()).with_arguments(arguments)),
+        )
+        .await
+        .map_err(|_| anyhow!("истекло время ожидания MCP-инструмента {}", call.name))?
+        .with_context(|| format!("MCP-инструмент {} завершился ошибкой", call.name))?;
+        let content = result
+            .structured_content
+            .unwrap_or_else(|| serde_json::to_value(&result.content).unwrap_or_default());
+        Ok(ToolResult {
+            call_id: call.id.clone(),
+            content,
+            is_error: result.is_error.unwrap_or(false),
+        })
+    }
+
+    pub(crate) async fn close(self) {
+        let _ = self.client.cancel().await;
+    }
 }
 
 pub(crate) fn reconcile_enabled_tools(
@@ -84,6 +176,24 @@ pub(crate) fn reconcile_enabled_tools(
     result.sort();
     result.dedup();
     result
+}
+
+pub(crate) fn enabled_tool_definitions(
+    available: &[McpToolInfo],
+    enabled: &[String],
+) -> Vec<ToolDefinition> {
+    let enabled = enabled.iter().collect::<std::collections::BTreeSet<_>>();
+    available
+        .iter()
+        .filter(|tool| enabled.contains(&tool.name))
+        .map(|tool| ToolDefinition {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            input_schema: tool.input_schema.clone(),
+            read_only: tool.read_only,
+            destructive: tool.destructive,
+        })
+        .collect()
 }
 
 pub(crate) fn switch_mcp_server(config: &mut crate::config::McpConfig, url: String) {
@@ -273,63 +383,12 @@ fn select_mcp_tools(
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct EchoRequest {
-    /// Text to return unchanged.
-    text: String,
-}
-
-#[derive(Debug, Clone)]
-struct EchoServer {
-    tool_router: ToolRouter<Self>,
-}
-
-impl EchoServer {
-    fn new() -> Self {
-        Self {
-            tool_router: Self::tool_router(),
-        }
-    }
-}
-
-#[tool_router(router = tool_router)]
-impl EchoServer {
-    #[tool(
-        name = "echo",
-        description = "Возвращает переданный текст без изменений"
-    )]
-    async fn echo(&self, Parameters(request): Parameters<EchoRequest>) -> String {
-        request.text
-    }
-}
-
-#[tool_handler(router = self.tool_router)]
-impl ServerHandler for EchoServer {}
-
-pub(crate) async fn run_mcp_server() -> Result<()> {
-    let listener = TcpListener::bind(MCP_SERVER_ADDR)
-        .await
-        .with_context(|| format!("не удалось запустить MCP-сервер на {MCP_SERVER_ADDR}"))?;
-    println!("MCP-сервер запущен: {MCP_SERVER_URL}");
-    serve_mcp_listener(listener).await
-}
-
-pub(crate) async fn serve_mcp_listener(listener: TcpListener) -> Result<()> {
-    let service = StreamableHttpService::new(
-        || Ok(EchoServer::new()),
-        LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default(),
-    );
-    let router = axum::Router::new().nest_service("/mcp", service);
-    axum::serve(listener, router)
-        .await
-        .context("MCP-сервер завершился с ошибкой")
-}
-
 #[cfg(test)]
 mod tests {
+    use super::server::*;
     use super::*;
     use serde_json::json;
+    use tokio::net::TcpListener;
 
     #[test]
     fn validates_http_urls() {
@@ -346,6 +405,9 @@ mod tests {
         let available = vec![McpToolInfo {
             name: "echo".into(),
             description: None,
+            input_schema: json!({}),
+            read_only: true,
+            destructive: false,
         }];
         assert_eq!(
             reconcile_enabled_tools(&available, &["old".into(), "echo".into(), "echo".into()]),
@@ -370,16 +432,47 @@ mod tests {
             McpToolInfo {
                 name: "zeta".into(),
                 description: None,
+                input_schema: json!({}),
+                read_only: true,
+                destructive: false,
             },
             McpToolInfo {
                 name: "echo".into(),
                 description: None,
+                input_schema: json!({}),
+                read_only: true,
+                destructive: false,
             },
         ];
         assert_eq!(
             selected_tool_names(&tools, &[0, 1, 0]),
             vec!["echo", "zeta"]
         );
+    }
+
+    #[test]
+    fn enabled_tool_definitions_preserve_schema_and_annotations() {
+        let tools = vec![
+            McpToolInfo {
+                name: "write".into(),
+                description: Some("Writes data".into()),
+                input_schema: json!({"type": "object", "required": ["title"]}),
+                read_only: false,
+                destructive: false,
+            },
+            McpToolInfo {
+                name: "hidden".into(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+                read_only: true,
+                destructive: false,
+            },
+        ];
+        let selected = enabled_tool_definitions(&tools, &["write".into(), "stale".into()]);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "write");
+        assert_eq!(selected[0].input_schema["required"][0], "title");
+        assert!(!selected[0].read_only);
     }
 
     #[tokio::test]
@@ -390,12 +483,21 @@ mod tests {
         let url = format!("http://{address}/mcp");
 
         let tools = fetch_tools(&url).await.unwrap();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "echo");
-        assert!(tools[0]
+        assert_eq!(tools.len(), 2);
+        let echo = tools.iter().find(|tool| tool.name == "echo").unwrap();
+        assert!(echo
             .description
             .as_deref()
             .is_some_and(|value| value.contains("Возвращает")));
+        let calendar = tools
+            .iter()
+            .find(|tool| tool.name == "create_calendar_event")
+            .unwrap();
+        assert!(!calendar.read_only);
+        assert_eq!(
+            calendar.input_schema["required"],
+            json!(["title", "start_at", "end_at"])
+        );
 
         let transport = StreamableHttpClientTransport::from_config(
             StreamableHttpClientTransportConfig::with_uri(url),

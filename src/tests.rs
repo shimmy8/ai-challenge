@@ -60,6 +60,73 @@ mod suite {
         }
     }
 
+    struct ToolScriptClient {
+        responses: Mutex<VecDeque<anyhow::Result<ApiAnswer>>>,
+        options: Mutex<Vec<RequestOptions>>,
+    }
+
+    impl ToolScriptClient {
+        fn new(responses: Vec<anyhow::Result<ApiAnswer>>) -> Arc<Self> {
+            Arc::new(Self {
+                responses: Mutex::new(responses.into()),
+                options: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl RequestClient for ToolScriptClient {
+        fn send<'a>(
+            &'a self,
+            _client: &'a Client,
+            _settings: &'a AgentSettings,
+            _history: &'a [Message],
+        ) -> RequestFuture<'a> {
+            Box::pin(async { Err(anyhow::anyhow!("нужен send_with_options")) })
+        }
+
+        fn send_with_options<'a>(
+            &'a self,
+            _client: &'a Client,
+            _settings: &'a AgentSettings,
+            _history: &'a [Message],
+            options: &'a RequestOptions,
+        ) -> RequestFuture<'a> {
+            self.options.lock().unwrap().push(options.clone());
+            let response = self.responses.lock().unwrap().pop_front().unwrap();
+            Box::pin(async move { response })
+        }
+    }
+
+    struct RecordingExecutor {
+        definitions: Vec<ToolDefinition>,
+        calls: Mutex<Vec<ToolCall>>,
+    }
+
+    struct RejectApproval;
+
+    impl ToolApproval for RejectApproval {
+        fn approve(&self, _definition: &ToolDefinition, _call: &ToolCall) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+    }
+
+    impl ToolExecutor for RecordingExecutor {
+        fn definitions(&self) -> Vec<ToolDefinition> {
+            self.definitions.clone()
+        }
+
+        fn execute<'a>(&'a self, call: &'a ToolCall) -> ToolFuture<'a> {
+            self.calls.lock().unwrap().push(call.clone());
+            Box::pin(async move {
+                Ok(ToolResult {
+                    call_id: call.id.clone(),
+                    content: json!({"created": true}),
+                    is_error: false,
+                })
+            })
+        }
+    }
+
     fn scripted_answer(text: &str) -> anyhow::Result<ApiAnswer> {
         Ok(ApiAnswer {
             text: text.to_owned(),
@@ -69,6 +136,20 @@ mod suite {
             output_tokens: 2,
             session_input_tokens: 0,
             session_output_tokens: 0,
+            tool_calls: Vec::new(),
+        })
+    }
+
+    fn scripted_tool_answer(call: ToolCall) -> anyhow::Result<ApiAnswer> {
+        Ok(ApiAnswer {
+            text: String::new(),
+            task_update: None,
+            task_update_warning: None,
+            input_tokens: 3,
+            output_tokens: 2,
+            session_input_tokens: 0,
+            session_output_tokens: 0,
+            tool_calls: vec![call],
         })
     }
 
@@ -87,9 +168,224 @@ mod suite {
     }
 
     #[test]
+    fn parses_openai_function_call_and_builds_continuation() {
+        let body = json!({
+            "output": [{
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "create_calendar_event",
+                "arguments": "{\"title\":\"Встреча\"}"
+            }]
+        });
+        let calls = extract_openai_tool_calls(&body).unwrap();
+        assert_eq!(calls[0].id, "call-1");
+        assert_eq!(calls[0].arguments["title"], "Встреча");
+
+        let mut options = RequestOptions {
+            tool_calls: calls,
+            ..RequestOptions::default()
+        };
+        options.tool_results.push(ToolResult {
+            call_id: "call-1".into(),
+            content: json!({"event_id": "event-1"}),
+            is_error: false,
+        });
+        let payload = build_openai_payload_with_options(
+            &test_agent_settings(),
+            &[Message {
+                role: "user".into(),
+                content: "создай встречу".into(),
+            }],
+            &options,
+        );
+        assert_eq!(payload["input"][1]["type"], "function_call");
+        assert_eq!(payload["input"][2]["type"], "function_call_output");
+        assert_eq!(payload["input"][2]["output"], "{\"event_id\":\"event-1\"}");
+    }
+
+    #[test]
+    fn default_request_options_do_not_advertise_tools() {
+        let options = RequestOptions::default();
+        assert!(options.tools.is_empty());
+        assert!(options.tool_results.is_empty());
+    }
+
+    #[test]
+    fn main_request_settings_include_calendar_time_context() {
+        let agent = Agent::new(1, Client::new(), test_agent_settings());
+        let instructions = agent.request_settings().instructions.unwrap();
+        assert!(instructions.contains("Europe/Moscow"));
+        assert!(instructions.contains("RFC 3339"));
+        assert!(instructions.contains("длительность"));
+    }
+
+    #[tokio::test]
+    async fn agent_executes_tool_and_sends_result_back_to_model() {
+        let client = ToolScriptClient::new(vec![
+            scripted_tool_answer(ToolCall {
+                id: "call-1".into(),
+                name: "create_calendar_event".into(),
+                arguments: json!({"title": "Встреча"}),
+            }),
+            scripted_answer("Событие создано"),
+        ]);
+        let executor = Arc::new(RecordingExecutor {
+            definitions: vec![ToolDefinition {
+                name: "create_calendar_event".into(),
+                description: Some("Создать событие".into()),
+                input_schema: json!({"type": "object"}),
+                read_only: false,
+                destructive: false,
+            }],
+            calls: Mutex::new(Vec::new()),
+        });
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client.clone();
+        agent.set_tool_runtime(Some(executor.clone()), Arc::new(AutoApprove));
+        let answer = agent.ask("Запланируй встречу").await.unwrap();
+        assert_eq!(answer.text, "Событие создано");
+        assert_eq!(executor.calls.lock().unwrap().len(), 1);
+        let options = client.options.lock().unwrap();
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].tools[0].name, "create_calendar_event");
+        assert_eq!(options[1].tool_results[0].content["created"], true);
+        assert_eq!(agent.persisted_history.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn both_provider_paths_execute_the_same_confirmed_tool_call() {
+        for provider in [Provider::Openai, Provider::Claude] {
+            let client = ToolScriptClient::new(vec![
+                scripted_tool_answer(ToolCall {
+                    id: format!("call-{provider:?}"),
+                    name: "create_calendar_event".into(),
+                    arguments: json!({"title": "Встреча", "start_at": "2026-09-23T15:00:00+03:00", "end_at": "2026-09-23T16:00:00+03:00"}),
+                }),
+                scripted_answer("Событие создано"),
+            ]);
+            let executor = Arc::new(RecordingExecutor {
+                definitions: vec![ToolDefinition {
+                    name: "create_calendar_event".into(),
+                    description: Some("Создать событие".into()),
+                    input_schema: json!({"type": "object"}),
+                    read_only: false,
+                    destructive: false,
+                }],
+                calls: Mutex::new(Vec::new()),
+            });
+            let mut settings = test_agent_settings();
+            settings.provider = provider;
+            let mut agent = Agent::new(1, Client::new(), settings);
+            agent.request_client = client.clone();
+            agent.set_tool_runtime(Some(executor.clone()), Arc::new(AutoApprove));
+            let answer = agent.ask("Запланируй встречу").await.unwrap();
+            assert_eq!(answer.text, "Событие создано");
+            assert_eq!(executor.calls.lock().unwrap().len(), 1);
+            assert_eq!(client.options.lock().unwrap().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_tool_call_is_not_executed_and_model_sees_cancellation() {
+        let client = ToolScriptClient::new(vec![
+            scripted_tool_answer(ToolCall {
+                id: "call-cancel".into(),
+                name: "create_calendar_event".into(),
+                arguments: json!({"title": "Встреча"}),
+            }),
+            scripted_answer("Создание отменено"),
+        ]);
+        let executor = Arc::new(RecordingExecutor {
+            definitions: vec![ToolDefinition {
+                name: "create_calendar_event".into(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+                read_only: false,
+                destructive: false,
+            }],
+            calls: Mutex::new(Vec::new()),
+        });
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client.clone();
+        agent.set_tool_runtime(Some(executor.clone()), Arc::new(RejectApproval));
+        let answer = agent.ask("Создай встречу").await.unwrap();
+        assert_eq!(answer.text, "Создание отменено");
+        assert!(executor.calls.lock().unwrap().is_empty());
+        assert!(client.options.lock().unwrap()[1].tool_results[0].is_error);
+    }
+
+    #[tokio::test]
+    async fn agent_rejects_more_than_three_tool_calls() {
+        let calls = (0..4)
+            .map(|index| ToolCall {
+                id: format!("call-{index}"),
+                name: "echo".into(),
+                arguments: json!({"text": "x"}),
+            })
+            .collect::<Vec<_>>();
+        let first = ApiAnswer {
+            text: String::new(),
+            task_update: None,
+            task_update_warning: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            session_input_tokens: 0,
+            session_output_tokens: 0,
+            tool_calls: calls,
+        };
+        let client = ToolScriptClient::new(vec![Ok(first)]);
+        let executor = Arc::new(RecordingExecutor {
+            definitions: vec![ToolDefinition {
+                name: "echo".into(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+                read_only: true,
+                destructive: false,
+            }],
+            calls: Mutex::new(Vec::new()),
+        });
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client;
+        agent.set_tool_runtime(Some(executor), Arc::new(AutoApprove));
+        let error = match agent.ask("Повтори").await {
+            Ok(_) => panic!("ожидалась ошибка лимита"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("лимит MCP-вызовов"));
+    }
+
+    #[test]
     pub(crate) fn parses_claude_response() {
         let body = json!({"content": [{"type": "text", "text": "Привет!"}]});
         assert_eq!(extract_claude_text(&body).unwrap(), "Привет!");
+    }
+
+    #[test]
+    fn parses_claude_tool_use_and_builds_continuation() {
+        let body = json!({
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu-1",
+                "name": "create_calendar_event",
+                "input": {"title": "Встреча"}
+            }]
+        });
+        let calls = extract_claude_tool_calls(&body).unwrap();
+        assert_eq!(calls[0].id, "toolu-1");
+        assert_eq!(calls[0].arguments["title"], "Встреча");
+
+        let mut options = RequestOptions {
+            tool_calls: calls,
+            ..RequestOptions::default()
+        };
+        options.tool_results.push(ToolResult {
+            call_id: "toolu-1".into(),
+            content: json!("создано"),
+            is_error: false,
+        });
+        let payload = build_claude_payload_with_options(&test_agent_settings(), &[], &options);
+        assert_eq!(payload["messages"][0]["role"], "assistant");
+        assert_eq!(payload["messages"][1]["content"][0]["type"], "tool_result");
     }
 
     #[test]
@@ -1364,6 +1660,7 @@ mod suite {
             output_tokens: 2,
             session_input_tokens: 0,
             session_output_tokens: 0,
+            tool_calls: Vec::new(),
         };
         process_task_answer(&mut answer, TaskPhase::Execution);
         assert_eq!(answer.text, "Результат");
@@ -1378,6 +1675,7 @@ mod suite {
             output_tokens: 0,
             session_input_tokens: 0,
             session_output_tokens: 0,
+            tool_calls: Vec::new(),
         };
         process_task_answer(&mut missing, TaskPhase::Planning);
         assert!(missing.task_update_warning.is_some());
@@ -1391,6 +1689,7 @@ mod suite {
             output_tokens: 0,
             session_input_tokens: 0,
             session_output_tokens: 0,
+            tool_calls: Vec::new(),
         };
         process_task_answer(&mut invalid, TaskPhase::Validation);
         assert_eq!(invalid.text, "Основной ответ");
@@ -1405,6 +1704,7 @@ mod suite {
             output_tokens: 0,
             session_input_tokens: 0,
             session_output_tokens: 0,
+            tool_calls: Vec::new(),
         };
         process_task_answer(&mut unfinished, TaskPhase::Execution);
         assert_eq!(unfinished.text, "Ожидаю схему orders.");
@@ -1450,6 +1750,7 @@ mod suite {
             output_tokens: 0,
             session_input_tokens: 0,
             session_output_tokens: 0,
+            tool_calls: Vec::new(),
         };
 
         assert_eq!(
@@ -1483,6 +1784,7 @@ mod suite {
             output_tokens: 0,
             session_input_tokens: 0,
             session_output_tokens: 0,
+            tool_calls: Vec::new(),
         };
         assert_eq!(
             persist_answer_task_update(&store, &mut pool, &mut final_answer),
@@ -1505,6 +1807,7 @@ mod suite {
             output_tokens: 0,
             session_input_tokens: 0,
             session_output_tokens: 0,
+            tool_calls: Vec::new(),
         };
         assert_eq!(
             persist_answer_task_update(&store, &mut pool, &mut duplicate),
@@ -1690,6 +1993,7 @@ mod suite {
             output_tokens: 0,
             session_input_tokens: 0,
             session_output_tokens: 0,
+            tool_calls: Vec::new(),
         };
 
         assert_eq!(
