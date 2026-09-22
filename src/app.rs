@@ -22,9 +22,70 @@ use std::{
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
+
+struct InteractiveToolApproval;
+
+impl ToolApproval for InteractiveToolApproval {
+    fn approve(&self, definition: &ToolDefinition, call: &ToolCall) -> Result<bool> {
+        println!(
+            "{} {}",
+            style("Предложен MCP-вызов:").yellow().bold(),
+            style(&definition.name).cyan().bold()
+        );
+        if call.name == "create_calendar_event" {
+            let title = call
+                .arguments
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("—");
+            let start = call
+                .arguments
+                .get("start_at")
+                .and_then(Value::as_str)
+                .unwrap_or("—");
+            let end = call
+                .arguments
+                .get("end_at")
+                .and_then(Value::as_str)
+                .unwrap_or("—");
+            println!("  Название: {title}");
+            println!("  Начало: {start}");
+            println!("  Окончание: {end}");
+            if let Some(description) = call.arguments.get("description").and_then(Value::as_str) {
+                println!("  Описание: {description}");
+            }
+            if let Some(location) = call.arguments.get("location").and_then(Value::as_str) {
+                println!("  Место: {location}");
+            }
+        } else {
+            println!(
+                "  Аргументы: {}",
+                serde_json::to_string_pretty(&call.arguments).unwrap_or_else(|_| "{}".into())
+            );
+        }
+        Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Выполнить действие?")
+            .default(false)
+            .interact()
+            .context("не удалось получить подтверждение MCP-вызова")
+    }
+}
+
+async fn build_mcp_runtime(config: &Config) -> Result<Option<SharedToolExecutor>> {
+    let Some(url) = config.mcp.server_url.as_deref() else {
+        return Ok(None);
+    };
+    if config.mcp.enabled_tools.is_empty() {
+        return Ok(None);
+    }
+    let runtime = McpRuntime::connect(url, &config.mcp.enabled_tools).await?;
+    Ok(Some(Arc::new(runtime)))
+}
 pub(crate) async fn run() -> Result<()> {
     let startup_mode = parse_startup_mode(std::env::args().skip(1))?;
     if startup_mode == StartupMode::McpServer {
+        let env_path = std::env::current_dir()?.join(".env-mcp");
+        crate::mcp::load_mcp_env_file(&env_path)?;
         return run_mcp_server().await;
     }
     let StartupMode::Interactive { dump_metrics } = startup_mode else {
@@ -64,6 +125,17 @@ pub(crate) async fn run() -> Result<()> {
         client.clone(),
         AgentSettings::from_config(&config, provider, initial_mode)?,
     );
+    let initial_tool_runtime = match build_mcp_runtime(&config).await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!(
+                "{} {error:#}",
+                style("MCP-инструменты пока недоступны:").yellow()
+            );
+            None
+        }
+    };
+    agents.set_tool_runtime(initial_tool_runtime, Arc::new(InteractiveToolApproval));
     agents.set_invariants(sessions.list_invariants()?);
     agents.set_memory(ActiveMemory {
         long_term_facts: sessions.list_memory_entries()?,
@@ -347,6 +419,15 @@ pub(crate) async fn run() -> Result<()> {
             "/mcp" => {
                 if let Err(error) = handle_mcp_command(&mut config, &config_path).await {
                     eprintln!("{} {error:#}", style("Команда MCP не выполнена:").red());
+                }
+                match build_mcp_runtime(&config).await {
+                    Ok(runtime) => {
+                        agents.set_tool_runtime(runtime, Arc::new(InteractiveToolApproval))
+                    }
+                    Err(error) => eprintln!(
+                        "{} {error:#}",
+                        style("MCP-инструменты не активированы:").yellow()
+                    ),
                 }
                 continue;
             }

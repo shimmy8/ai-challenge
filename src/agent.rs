@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-use crate::{config::*, memory::*, providers::*, sessions::*};
+use crate::{config::*, mcp::*, memory::*, providers::*, sessions::*};
 pub(crate) const SUMMARY_MAX_CHARS: usize = 4000;
 use anyhow::{anyhow, bail, Context, Result};
 use console::{style, Key, Term};
@@ -31,6 +31,16 @@ pub(crate) trait RequestClient: Send + Sync {
         settings: &'a AgentSettings,
         history: &'a [Message],
     ) -> RequestFuture<'a>;
+
+    fn send_with_options<'a>(
+        &'a self,
+        client: &'a Client,
+        settings: &'a AgentSettings,
+        history: &'a [Message],
+        _options: &'a RequestOptions,
+    ) -> RequestFuture<'a> {
+        self.send(client, settings, history)
+    }
 }
 
 pub(crate) struct LiveRequestClient;
@@ -42,7 +52,19 @@ impl RequestClient for LiveRequestClient {
         settings: &'a AgentSettings,
         history: &'a [Message],
     ) -> RequestFuture<'a> {
-        Box::pin(send_request(client, settings, history))
+        Box::pin(async move {
+            send_request(client, settings, history, &RequestOptions::default()).await
+        })
+    }
+
+    fn send_with_options<'a>(
+        &'a self,
+        client: &'a Client,
+        settings: &'a AgentSettings,
+        history: &'a [Message],
+        options: &'a RequestOptions,
+    ) -> RequestFuture<'a> {
+        Box::pin(send_request(client, settings, history, options))
     }
 }
 pub(crate) struct ApiAnswer {
@@ -53,6 +75,7 @@ pub(crate) struct ApiAnswer {
     pub(crate) output_tokens: u64,
     pub(crate) session_input_tokens: u64,
     pub(crate) session_output_tokens: u64,
+    pub(crate) tool_calls: Vec<ToolCall>,
 }
 
 pub(crate) fn process_task_answer(answer: &mut ApiAnswer, phase: TaskPhase) {
@@ -261,6 +284,8 @@ pub(crate) struct Agent {
     pub(crate) session_output_tokens: u64,
     pub(crate) status: AgentStatus,
     pub(crate) memory: ActiveMemory,
+    pub(crate) tool_executor: Option<SharedToolExecutor>,
+    pub(crate) tool_approval: SharedToolApproval,
 }
 
 impl Agent {
@@ -283,6 +308,8 @@ impl Agent {
             session_output_tokens: 0,
             status: AgentStatus::Idle,
             memory: ActiveMemory::default(),
+            tool_executor: None,
+            tool_approval: Arc::new(AutoApprove),
         }
     }
 
@@ -313,14 +340,113 @@ impl Agent {
             content: input.to_owned(),
         });
 
+        let tool_definitions = self
+            .tool_executor
+            .as_ref()
+            .map(|executor| executor.definitions())
+            .unwrap_or_default();
+        let mut request_options = RequestOptions {
+            tools: tool_definitions.clone(),
+            ..RequestOptions::default()
+        };
+        let mut external_action_completed = false;
         let mut answer = self
             .request_client
-            .send(&self.client, &self.request_settings(), &self.history)
+            .send_with_options(
+                &self.client,
+                &self.request_settings(),
+                &self.history,
+                &request_options,
+            )
             .await?;
         self.session_input_tokens += answer.input_tokens;
         self.session_output_tokens += answer.output_tokens;
+        let mut tool_calls_count = 0;
+        while !answer.tool_calls.is_empty() {
+            if tool_calls_count + answer.tool_calls.len() > 3 {
+                bail!("достигнут лимит MCP-вызовов для одного запроса (3)");
+            }
+            let mut results = Vec::with_capacity(answer.tool_calls.len());
+            for call in &answer.tool_calls {
+                tool_calls_count += 1;
+                let definition = tool_definitions
+                    .iter()
+                    .find(|definition| definition.name == call.name)
+                    .ok_or_else(|| anyhow!("MCP-инструмент «{}» не разрешён", call.name))?;
+                let executor = self
+                    .tool_executor
+                    .clone()
+                    .ok_or_else(|| anyhow!("MCP-инструмент «{}» недоступен", call.name))?;
+                if !self.invariants.is_empty() {
+                    let verdict = self.verify_tool_call(input, call).await?;
+                    match verdict.verdict {
+                        VerificationVerdict::Allow => {}
+                        VerificationVerdict::Violation => {
+                            answer.text =
+                                invariant_refusal(&self.invariants, &verdict.invariant_ids)?;
+                            answer.tool_calls.clear();
+                            break;
+                        }
+                        VerificationVerdict::CompliantRefusal | VerificationVerdict::Uncertain => {
+                            bail!("проверка MCP-действия не дала разрешения на выполнение")
+                        }
+                    }
+                }
+                let approved =
+                    definition.read_only || self.tool_approval.approve(definition, call)?;
+                if !approved {
+                    results.push(ToolResult {
+                        call_id: call.id.clone(),
+                        content: json!({"cancelled": true, "reason": "cancelled_by_user"}),
+                        is_error: true,
+                    });
+                    continue;
+                }
+                let result = executor
+                    .execute(call)
+                    .await
+                    .unwrap_or_else(|error| ToolResult {
+                        call_id: call.id.clone(),
+                        content: json!({"error": error.to_string()}),
+                        is_error: true,
+                    });
+                if !result.is_error && !definition.read_only {
+                    external_action_completed = true;
+                }
+                results.push(result);
+            }
+            request_options.tool_calls = answer.tool_calls.clone();
+            request_options.tool_results = results;
+            answer = self
+                .request_client
+                .send_with_options(
+                    &self.client,
+                    &self.request_settings(),
+                    &self.history,
+                    &request_options,
+                )
+                .await
+                .map_err(|error| {
+                    if external_action_completed {
+                        anyhow!("внешнее действие уже выполнено, но итоговый ответ не сформирован: {error}")
+                    } else {
+                        error
+                    }
+                })?;
+            self.session_input_tokens += answer.input_tokens;
+            self.session_output_tokens += answer.output_tokens;
+        }
         if !self.invariants.is_empty() {
-            let verdict = self.verify_draft(input, &answer.text).await?;
+            let verdict = self
+                .verify_draft(input, &answer.text)
+                .await
+                .map_err(|error| {
+                    if external_action_completed {
+                        anyhow!("внешнее действие уже выполнено, но проверка итогового ответа не удалась: {error}")
+                    } else {
+                        error
+                    }
+                })?;
             answer.input_tokens += verdict.0.input_tokens;
             answer.output_tokens += verdict.0.output_tokens;
             match verdict.1.verdict {
@@ -382,15 +508,43 @@ impl Agent {
                 "draft": draft,
             }))?,
         }];
+        let request_options = RequestOptions::default();
         let checked = self
             .request_client
-            .send(&self.client, &settings, &source)
+            .send_with_options(&self.client, &settings, &source, &request_options)
             .await
             .context("технический сбой проверки инвариантов")?;
         self.session_input_tokens += checked.input_tokens;
         self.session_output_tokens += checked.output_tokens;
         let verdict = parse_verification_result(&checked.text, &self.invariants)?;
         Ok((checked, verdict))
+    }
+
+    async fn verify_tool_call(
+        &mut self,
+        input: &str,
+        call: &ToolCall,
+    ) -> Result<VerificationResult> {
+        let mut settings = self.settings.clone();
+        settings.temperature = 0.0;
+        settings.instructions = Some("Проверь, допустимо ли предлагаемое внешнее действие относительно активных глобальных инвариантов. Верни только JSON-объект с ровно тремя полями: verdict (allow, compliant_refusal, violation или uncertain), invariant_ids (массив целых ID) и reason (строка). Для allow верни пустой список ID; для остальных исходов укажи применимые ID и короткую причину. Не придумывай ID.".to_owned());
+        let source = [Message {
+            role: "user".to_owned(),
+            content: serde_json::to_string(&json!({
+                "invariants": self.invariants.iter().map(|rule| json!({"id": rule.id, "text": rule.content})).collect::<Vec<_>>(),
+                "user_request": input,
+                "proposed_tool_call": {"id": call.id, "name": call.name, "arguments": call.arguments},
+            }))?,
+        }];
+        let request_options = RequestOptions::default();
+        let checked = self
+            .request_client
+            .send_with_options(&self.client, &settings, &source, &request_options)
+            .await
+            .context("технический сбой проверки MCP-действия")?;
+        self.session_input_tokens += checked.input_tokens;
+        self.session_output_tokens += checked.output_tokens;
+        parse_verification_result(&checked.text, &self.invariants)
     }
 
     fn request_state(&self) -> AgentRequestState {
@@ -437,6 +591,13 @@ impl Agent {
     pub(crate) fn request_settings(&self) -> AgentSettings {
         let mut settings = self.settings.clone();
         let mut sections = Vec::new();
+        let moscow = chrono::FixedOffset::east_opt(3 * 60 * 60)
+            .expect("фиксированное смещение Москвы корректно");
+        let now = chrono::Utc::now().with_timezone(&moscow);
+        sections.push(format!(
+            "Текущее время приложения: {} (Europe/Moscow). Для календарных событий используй абсолютные RFC 3339 значения со смещением. Если пользователь не указал время начала или длительность, сначала задай уточняющий вопрос и не вызывай инструмент.",
+            now.format("%Y-%m-%dT%H:%M%:z")
+        ));
         if !self.invariants.is_empty() {
             let rules = self
                 .invariants
@@ -566,9 +727,10 @@ impl Agent {
                 encode_messages_toon(&self.history[..count])
             ),
         }];
+        let request_options = RequestOptions::default();
         let answer = self
             .request_client
-            .send(&self.client, &settings, &source)
+            .send_with_options(&self.client, &settings, &source, &request_options)
             .await
             .context("не удалось сжать историю; контекст сохранён, повторите запрос")?;
         self.session_input_tokens += answer.input_tokens;
@@ -591,9 +753,10 @@ impl Agent {
                 input
             ),
         }];
+        let request_options = RequestOptions::default();
         let answer = self
             .request_client
-            .send(&self.client, &settings, &source)
+            .send_with_options(&self.client, &settings, &source, &request_options)
             .await
             .context("не удалось обновить sticky facts; контекст сохранён, повторите запрос")?;
         let facts = parse_facts(&answer.text)?;
@@ -723,6 +886,15 @@ impl Agent {
     pub(crate) fn set_invariants(&mut self, invariants: Vec<Invariant>) {
         self.invariants = invariants.into_iter().filter(|rule| rule.enabled).collect();
     }
+
+    pub(crate) fn set_tool_runtime(
+        &mut self,
+        executor: Option<SharedToolExecutor>,
+        approval: SharedToolApproval,
+    ) {
+        self.tool_executor = executor;
+        self.tool_approval = approval;
+    }
 }
 
 pub(crate) struct AgentPool {
@@ -825,6 +997,16 @@ impl AgentPool {
         self.agents
             .iter_mut()
             .for_each(|agent| agent.set_invariants(invariants.clone()));
+    }
+
+    pub(crate) fn set_tool_runtime(
+        &mut self,
+        executor: Option<SharedToolExecutor>,
+        approval: SharedToolApproval,
+    ) {
+        self.agents
+            .iter_mut()
+            .for_each(|agent| agent.set_tool_runtime(executor.clone(), approval.clone()));
     }
 
     pub(crate) fn memory(&self) -> ActiveMemory {
