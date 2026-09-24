@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use reqwest::{Client, Method, StatusCode, Url};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -34,7 +34,8 @@ pub(crate) fn load_mcp_env_file(path: &Path) -> Result<bool> {
         };
         let key = key.trim();
         anyhow::ensure!(
-            key.starts_with("YANDEX_CALDAV_")
+            (key.starts_with("YANDEX_CALDAV_")
+                || matches!(key, "TELEGRAM_BOT_TOKEN" | "TELEGRAM_CHAT_ID"))
                 && key.chars().all(|character| {
                     character.is_ascii_uppercase() || character == '_' || character.is_ascii_digit()
                 }),
@@ -86,6 +87,15 @@ pub(crate) struct CalendarEventResult {
     pub(crate) start_at: String,
     pub(crate) end_at: String,
     pub(crate) calendar: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub(crate) struct CalendarDigestEvent {
+    pub(crate) title: String,
+    pub(crate) start_at: String,
+    pub(crate) end_at: Option<String>,
+    pub(crate) all_day: bool,
+    pub(crate) location: Option<String>,
 }
 
 #[derive(Clone)]
@@ -173,6 +183,49 @@ impl CalDavClient {
             end_at: end.to_rfc3339(),
             calendar: collection.display_name,
         })
+    }
+
+    pub(crate) async fn list_events(
+        &self,
+        from: DateTime<FixedOffset>,
+        to: DateTime<FixedOffset>,
+    ) -> Result<Vec<CalendarDigestEvent>> {
+        anyhow::ensure!(to > from, "интервал календаря должен быть положительным");
+        let collection = self.select_calendar().await?;
+        let body = format!(
+            "<c:calendar-query xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:prop><d:getetag/><c:calendar-data/></d:prop><c:filter><c:comp-filter name=\"VCALENDAR\"><c:comp-filter name=\"VEVENT\"><c:time-range start=\"{}\" end=\"{}\"/></c:comp-filter></c:comp-filter></c:filter></c:calendar-query>",
+            from.with_timezone(&Utc).format("%Y%m%dT%H%M%SZ"),
+            to.with_timezone(&Utc).format("%Y%m%dT%H%M%SZ"),
+        );
+        let response = self
+            .http
+            .request(Method::from_bytes(b"REPORT")?, collection.href)
+            .basic_auth(&self.settings.username, Some(&self.settings.password))
+            .header("Depth", "1")
+            .header("Content-Type", "application/xml; charset=utf-8")
+            .body(body)
+            .send()
+            .await
+            .context("не удалось прочитать события Яндекс Календаря")?;
+        let status = response.status();
+        if status != StatusCode::MULTI_STATUS && !status.is_success() {
+            let _ = response.text().await;
+            bail!("CalDAV чтение календаря завершилось ошибкой ({status})");
+        }
+        let xml = response
+            .text()
+            .await
+            .context("не удалось прочитать ответ календаря")?;
+        let mut events = Vec::new();
+        for data in xml_texts(&xml, "calendar-data") {
+            for event in parse_digest_events(&data) {
+                if event_overlaps(&event, from, to) {
+                    events.push(event);
+                }
+            }
+        }
+        events.sort_by(|left, right| left.start_at.cmp(&right.start_at));
+        Ok(events)
     }
 
     async fn select_calendar(&self) -> Result<CalendarCollection> {
@@ -304,6 +357,114 @@ fn parse_timestamp(value: &str, label: &str) -> Result<DateTime<FixedOffset>> {
         "время {label} должно содержать смещение"
     );
     Ok(parsed)
+}
+
+fn parse_digest_event(ics: &str) -> Result<CalendarDigestEvent> {
+    let lines = unfold_icalendar(ics);
+    let value = |name: &str| {
+        lines.iter().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.split(';').next() == Some(name)).then(|| value.to_owned())
+        })
+    };
+    let start_line = lines
+        .iter()
+        .find(|line| line.starts_with("DTSTART"))
+        .ok_or_else(|| anyhow!("событие не содержит DTSTART"))?;
+    let all_day = start_line.split(';').any(|part| part == "VALUE=DATE");
+    let start_raw = start_line
+        .split_once(':')
+        .map(|(_, value)| value)
+        .unwrap_or_default();
+    let start = parse_ical_time(start_raw, all_day)?;
+    let end = value("DTEND")
+        .map(|raw| parse_ical_time(&raw, all_day))
+        .transpose()?;
+    Ok(CalendarDigestEvent {
+        title: value("SUMMARY").unwrap_or_else(|| "Без названия".into()),
+        start_at: start,
+        end_at: end,
+        all_day,
+        location: value("LOCATION").filter(|value| !value.trim().is_empty()),
+    })
+}
+
+fn parse_digest_events(ics: &str) -> Vec<CalendarDigestEvent> {
+    let unfolded = ics.replace("\r\n", "\n").replace('\r', "\n");
+    unfolded
+        .split("BEGIN:VEVENT")
+        .skip(1)
+        .filter_map(|part| {
+            let body = part.split_once("END:VEVENT")?.0;
+            parse_digest_event(&format!("BEGIN:VEVENT\n{body}END:VEVENT")).ok()
+        })
+        .collect()
+}
+
+fn unfold_icalendar(value: &str) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for raw in value.replace("\r\n", "\n").replace('\r', "\n").lines() {
+        if raw.starts_with(' ') || raw.starts_with('\t') {
+            if let Some(last) = lines.last_mut() {
+                last.push_str(raw.trim_start());
+            }
+        } else {
+            lines.push(raw.to_owned());
+        }
+    }
+    lines
+}
+
+fn parse_ical_time(value: &str, all_day: bool) -> Result<String> {
+    if all_day {
+        return Ok(NaiveDate::parse_from_str(value, "%Y%m%d")?
+            .format("%Y-%m-%d")
+            .to_string());
+    }
+    let is_utc = value.ends_with('Z');
+    let value = value.trim_end_matches('Z');
+    let parsed = NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S")?;
+    // Yandex returns DTSTART;TZID=Europe/Moscow without a trailing Z. Such
+    // values are local calendar times, not UTC timestamps.
+    let offset = if is_utc {
+        FixedOffset::east_opt(0).unwrap()
+    } else {
+        FixedOffset::east_opt(3 * 60 * 60).unwrap()
+    };
+    Ok(offset
+        .from_local_datetime(&parsed)
+        .single()
+        .expect("fixed offset has one local time")
+        .to_rfc3339())
+}
+
+fn event_overlaps(
+    event: &CalendarDigestEvent,
+    from: DateTime<FixedOffset>,
+    to: DateTime<FixedOffset>,
+) -> bool {
+    if event.all_day {
+        let Ok(start) = NaiveDate::parse_from_str(&event.start_at, "%Y-%m-%d") else {
+            return false;
+        };
+        let end = event
+            .end_at
+            .as_deref()
+            .and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok())
+            .unwrap_or_else(|| start.succ_opt().unwrap_or(start));
+        let from_date = from.date_naive();
+        let to_date = to.date_naive();
+        return start < to_date && end > from_date;
+    }
+    let Ok(start) = DateTime::parse_from_rfc3339(&event.start_at) else {
+        return false;
+    };
+    let end = event
+        .end_at
+        .as_deref()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .unwrap_or(start + chrono::Duration::minutes(1));
+    start < to && end > from
 }
 
 pub(crate) fn build_icalendar(
@@ -507,6 +668,27 @@ fn strip_xml_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_multiple_events_from_one_calendar_data_block() {
+        let ics = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nDTSTART:20260925T090000Z\nDTEND:20260925T100000Z\nSUMMARY:Первое\nEND:VEVENT\nBEGIN:VEVENT\nDTSTART:20260925T110000Z\nDTEND:20260925T120000Z\nSUMMARY:Второе\nEND:VEVENT\nEND:VCALENDAR";
+        let events = parse_digest_events(ics);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].title, "Первое");
+        assert_eq!(events[1].title, "Второе");
+    }
+
+    #[test]
+    fn treats_floating_ical_times_as_moscow_local_time() {
+        assert_eq!(
+            parse_ical_time("20260925T080000", false).unwrap(),
+            "2026-09-25T08:00:00+03:00"
+        );
+        assert_eq!(
+            parse_ical_time("20260925T050000Z", false).unwrap(),
+            "2026-09-25T05:00:00+00:00"
+        );
+    }
 
     #[test]
     fn validates_calendar_event_times_and_ical_escaping() {
