@@ -12,11 +12,17 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
 
 use super::calendar::{CalDavClient, CalendarEventRequest, CalendarEventResult};
-use super::{MCP_SERVER_ADDR, MCP_SERVER_URL};
+use super::{
+    calculate_github_metrics, render_github_report, save_report_in_directory,
+    CalculateGithubMetricsRequest, GithubActivityRequest, GithubClient, GithubMetrics,
+    GithubProjectActivity, GithubRepositoryMetadata, GithubRepositoryRequest,
+    RenderGithubReportRequest, SaveReportRequest, SaveReportResult, MCP_SERVER_ADDR,
+    MCP_SERVER_URL,
+};
 use crate::{
     DigestTargetDay, JobStatus, ScheduleSpec, SchedulerHistory, SchedulerJob, SchedulerRun,
     SchedulerRuntime, SchedulerStore, SCHEDULER_FILE,
@@ -67,13 +73,21 @@ fn default_history_limit() -> u32 {
 struct EchoServer {
     tool_router: ToolRouter<Self>,
     scheduler: Arc<SchedulerRuntime>,
+    github: GithubClient,
+    report_directory: PathBuf,
 }
 
 impl EchoServer {
-    fn new(scheduler: Arc<SchedulerRuntime>) -> Self {
+    fn new(
+        scheduler: Arc<SchedulerRuntime>,
+        github: GithubClient,
+        report_directory: PathBuf,
+    ) -> Self {
         Self {
             tool_router: Self::tool_router(),
             scheduler,
+            github,
+            report_directory,
         }
     }
 }
@@ -87,6 +101,84 @@ impl EchoServer {
     )]
     async fn echo(&self, Parameters(request): Parameters<EchoRequest>) -> String {
         request.text
+    }
+
+    #[tool(
+        name = "github_repository_metadata",
+        description = "Возвращает публичные метаданные и языки GitHub-репозитория без токена",
+        annotations(read_only_hint = true, destructive_hint = false)
+    )]
+    async fn github_repository_metadata(
+        &self,
+        Parameters(request): Parameters<GithubRepositoryRequest>,
+    ) -> Result<Json<GithubRepositoryMetadata>, rmcp::ErrorData> {
+        self.github
+            .repository_metadata(&request)
+            .await
+            .map(Json)
+            .map_err(server_error)
+    }
+
+    #[tool(
+        name = "github_project_activity",
+        description = "Собирает публичную активность GitHub-репозитория за период от 1 до 365 дней",
+        annotations(read_only_hint = true, destructive_hint = false)
+    )]
+    async fn github_project_activity(
+        &self,
+        Parameters(request): Parameters<GithubActivityRequest>,
+    ) -> Result<Json<GithubProjectActivity>, rmcp::ErrorData> {
+        self.github
+            .project_activity(&request)
+            .await
+            .map(Json)
+            .map_err(server_error)
+    }
+
+    #[tool(
+        name = "calculate_github_metrics",
+        description = "Детерминированно рассчитывает метрики GitHub-проекта из metadata и activity",
+        annotations(read_only_hint = true, destructive_hint = false)
+    )]
+    async fn calculate_github_metrics(
+        &self,
+        Parameters(request): Parameters<CalculateGithubMetricsRequest>,
+    ) -> Result<Json<GithubMetrics>, rmcp::ErrorData> {
+        calculate_github_metrics(&request)
+            .map(Json)
+            .map_err(server_error)
+    }
+
+    #[tool(
+        name = "render_github_report",
+        description = "Формирует Markdown-отчёт из метаданных и рассчитанных метрик GitHub",
+        annotations(read_only_hint = true, destructive_hint = false)
+    )]
+    async fn render_github_report(
+        &self,
+        Parameters(request): Parameters<RenderGithubReportRequest>,
+    ) -> Result<Json<String>, rmcp::ErrorData> {
+        render_github_report(&request)
+            .map(Json)
+            .map_err(server_error)
+    }
+
+    #[tool(
+        name = "save_report_to_file",
+        description = "Сохраняет произвольный UTF-8 отчёт в безопасное имя файла рабочего каталога MCP-сервера",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn save_report_to_file(
+        &self,
+        Parameters(request): Parameters<SaveReportRequest>,
+    ) -> Result<Json<SaveReportResult>, rmcp::ErrorData> {
+        save_report_in_directory(&self.report_directory, &request)
+            .map(Json)
+            .map_err(server_error)
     }
 
     #[tool(
@@ -332,8 +424,26 @@ async fn serve_mcp_listener_with_scheduler(
     listener: TcpListener,
     scheduler: Arc<SchedulerRuntime>,
 ) -> Result<()> {
+    let github = GithubClient::public()?;
+    let report_directory =
+        std::env::current_dir().context("не удалось определить рабочий каталог")?;
+    serve_mcp_listener_with_services(listener, scheduler, github, report_directory).await
+}
+
+async fn serve_mcp_listener_with_services(
+    listener: TcpListener,
+    scheduler: Arc<SchedulerRuntime>,
+    github: GithubClient,
+    report_directory: PathBuf,
+) -> Result<()> {
     let service = StreamableHttpService::new(
-        move || Ok(EchoServer::new(scheduler.clone())),
+        move || {
+            Ok(EchoServer::new(
+                scheduler.clone(),
+                github.clone(),
+                report_directory.clone(),
+            ))
+        },
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     );
@@ -341,4 +451,19 @@ async fn serve_mcp_listener_with_scheduler(
     axum::serve(listener, router)
         .await
         .context("MCP-сервер завершился с ошибкой")
+}
+
+#[cfg(test)]
+pub(crate) async fn serve_mcp_listener_with_services_for_test(
+    listener: TcpListener,
+    github: GithubClient,
+    report_directory: PathBuf,
+) -> Result<()> {
+    let store = SchedulerStore::open(temp_scheduler_path())?;
+    let context = Arc::new(crate::BackgroundContext::from_config(
+        &crate::Config::default(),
+    )?);
+    let runner = Arc::new(crate::DigestRunner::new(context));
+    let scheduler = Arc::new(SchedulerRuntime::new(store, runner));
+    serve_mcp_listener_with_services(listener, scheduler, github, report_directory).await
 }

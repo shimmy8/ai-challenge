@@ -12,7 +12,7 @@ fn calendar_log(message: impl AsRef<str>) {
     eprintln!("MCP calendar: {}", message.as_ref());
 }
 
-/// Load CalDAV variables for the MCP server from a local dotenv file.
+/// Load allowlisted integration variables for the MCP server from a local dotenv file.
 /// Explicit process variables take precedence over values from the file.
 pub(crate) fn load_mcp_env_file(path: &Path) -> Result<bool> {
     if !path.exists() {
@@ -34,11 +34,7 @@ pub(crate) fn load_mcp_env_file(path: &Path) -> Result<bool> {
         };
         let key = key.trim();
         anyhow::ensure!(
-            (key.starts_with("YANDEX_CALDAV_")
-                || matches!(key, "TELEGRAM_BOT_TOKEN" | "TELEGRAM_CHAT_ID"))
-                && key.chars().all(|character| {
-                    character.is_ascii_uppercase() || character == '_' || character.is_ascii_digit()
-                }),
+            allowed_mcp_env_key(key),
             "недопустимое имя переменной в {}:{}",
             path.display(),
             line_number + 1
@@ -48,6 +44,17 @@ pub(crate) fn load_mcp_env_file(path: &Path) -> Result<bool> {
         }
     }
     Ok(true)
+}
+
+fn allowed_mcp_env_key(key: &str) -> bool {
+    (key.starts_with("YANDEX_CALDAV_")
+        || matches!(
+            key,
+            "TELEGRAM_BOT_TOKEN" | "TELEGRAM_CHAT_ID" | "GITHUB_TOKEN"
+        ))
+        && key.chars().all(|character| {
+            character.is_ascii_uppercase() || character == '_' || character.is_ascii_digit()
+        })
 }
 
 fn parse_env_value(value: &str) -> String {
@@ -711,6 +718,8 @@ mod tests {
         assert_eq!(parse_env_value("\"secret value\""), "secret value");
         assert_eq!(parse_env_value("plain # comment"), "plain");
         assert_eq!(parse_env_value("'quoted'"), "quoted");
+        assert!(allowed_mcp_env_key("GITHUB_TOKEN"));
+        assert!(!allowed_mcp_env_key("GITHUB_TOKEN_EXTRA"));
     }
 
     #[test]

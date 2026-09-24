@@ -10,7 +10,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -25,7 +25,7 @@ mod suite {
         task_phase_start_instruction, task_transition_prompt, ProfileCommandOutcome,
         TaskCommandOutcome, TaskUpdateProgress,
     };
-    use std::{collections::VecDeque, sync::Mutex};
+    use std::{collections::VecDeque, sync::Mutex, time::Duration};
 
     type RecordedCall = (Option<String>, Vec<Message>, Provider);
 
@@ -102,11 +102,32 @@ mod suite {
         calls: Mutex<Vec<ToolCall>>,
     }
 
+    struct PipelineExecutor {
+        definitions: Vec<ToolDefinition>,
+        calls: Mutex<Vec<ToolCall>>,
+        fail_tool: Option<String>,
+    }
+
+    struct SlowPipelineExecutor {
+        calls: Mutex<Vec<ToolCall>>,
+    }
+
     struct RejectApproval;
+
+    struct CountingApproval {
+        calls: AtomicUsize,
+    }
 
     impl ToolApproval for RejectApproval {
         fn approve(&self, _definition: &ToolDefinition, _call: &ToolCall) -> anyhow::Result<bool> {
             Ok(false)
+        }
+    }
+
+    impl ToolApproval for CountingApproval {
+        fn approve(&self, _definition: &ToolDefinition, _call: &ToolCall) -> anyhow::Result<bool> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
         }
     }
 
@@ -124,6 +145,102 @@ mod suite {
                     is_error: false,
                 })
             })
+        }
+    }
+
+    impl ToolExecutor for PipelineExecutor {
+        fn definitions(&self) -> Vec<ToolDefinition> {
+            self.definitions.clone()
+        }
+
+        fn execute<'a>(&'a self, call: &'a ToolCall) -> ToolFuture<'a> {
+            self.calls.lock().unwrap().push(call.clone());
+            let fail = self.fail_tool.as_deref() == Some(call.name.as_str());
+            let result = match call.name.as_str() {
+                "source" => json!({"items": [1, 2]}),
+                "render" => json!("# Отчёт"),
+                "save" => json!({"path": "report.md", "bytes_written": 15}),
+                _ => call.arguments.clone(),
+            };
+            Box::pin(async move {
+                Ok(ToolResult {
+                    call_id: call.id.clone(),
+                    content: if fail {
+                        json!({"error": "boom"})
+                    } else {
+                        result
+                    },
+                    is_error: fail,
+                })
+            })
+        }
+    }
+
+    impl ToolExecutor for SlowPipelineExecutor {
+        fn definitions(&self) -> Vec<ToolDefinition> {
+            pipeline_definitions()
+        }
+
+        fn execute<'a>(&'a self, call: &'a ToolCall) -> ToolFuture<'a> {
+            self.calls.lock().unwrap().push(call.clone());
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok(ToolResult {
+                    call_id: call.id.clone(),
+                    content: json!({"late": true}),
+                    is_error: false,
+                })
+            })
+        }
+    }
+
+    fn pipeline_definitions() -> Vec<ToolDefinition> {
+        vec![
+            ToolDefinition {
+                name: "source".into(),
+                description: None,
+                input_schema: json!({"type": "object", "required": ["query"]}),
+                read_only: true,
+                destructive: false,
+            },
+            ToolDefinition {
+                name: "render".into(),
+                description: None,
+                input_schema: json!({"type": "object", "required": ["data"]}),
+                read_only: true,
+                destructive: false,
+            },
+            ToolDefinition {
+                name: "save".into(),
+                description: None,
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["filename", "content"],
+                    "properties": {"content": {"type": "string"}}
+                }),
+                read_only: false,
+                destructive: false,
+            },
+        ]
+    }
+
+    fn sample_pipeline_call(step_count: usize) -> ToolCall {
+        let mut steps = vec![json!({
+            "id": "source",
+            "tool": "source",
+            "arguments": {"query": "rust"}
+        })];
+        for index in 1..step_count {
+            steps.push(json!({
+                "id": format!("echo-{index}"),
+                "tool": "source",
+                "arguments": {"query": "rust"}
+            }));
+        }
+        ToolCall {
+            id: "pipeline-1".into(),
+            name: PIPELINE_TOOL_NAME.into(),
+            arguments: json!({"name": "report", "steps": steps}),
         }
     }
 
@@ -352,6 +469,653 @@ mod suite {
             Err(error) => error,
         };
         assert!(error.to_string().contains("лимит MCP-вызовов"));
+    }
+
+    #[test]
+    fn pipeline_plan_round_trips_and_schema_has_step_limit() {
+        let plan = PipelinePlan {
+            name: "report".into(),
+            steps: vec![PipelineStep {
+                id: "source".into(),
+                tool: "echo".into(),
+                arguments: json!({"text": "данные"}),
+            }],
+        };
+        let encoded = serde_json::to_value(&plan).unwrap();
+        assert_eq!(parse_pipeline_plan(&encoded).unwrap(), plan);
+        let definition = pipeline_tool_definition();
+        assert_eq!(definition.name, PIPELINE_TOOL_NAME);
+        assert_eq!(
+            definition.input_schema["properties"]["steps"]["maxItems"],
+            MAX_PIPELINE_STEPS
+        );
+    }
+
+    #[test]
+    fn pipeline_validation_rejects_disabled_duplicate_and_forward_steps() {
+        let definitions = vec![ToolDefinition {
+            name: "echo".into(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+            read_only: true,
+            destructive: false,
+        }];
+        let disabled = PipelinePlan {
+            name: "bad".into(),
+            steps: vec![PipelineStep {
+                id: "one".into(),
+                tool: "missing".into(),
+                arguments: json!({}),
+            }],
+        };
+        assert!(validate_pipeline_plan(&disabled, &definitions).is_err());
+
+        let duplicate = PipelinePlan {
+            name: "bad".into(),
+            steps: vec![
+                PipelineStep {
+                    id: "same".into(),
+                    tool: "echo".into(),
+                    arguments: json!({}),
+                },
+                PipelineStep {
+                    id: "same".into(),
+                    tool: "echo".into(),
+                    arguments: json!({}),
+                },
+            ],
+        };
+        assert!(validate_pipeline_plan(&duplicate, &definitions).is_err());
+
+        let forward = PipelinePlan {
+            name: "bad".into(),
+            steps: vec![
+                PipelineStep {
+                    id: "first".into(),
+                    tool: "echo".into(),
+                    arguments: json!({"value": {"$ref": "second.output"}}),
+                },
+                PipelineStep {
+                    id: "second".into(),
+                    tool: "echo".into(),
+                    arguments: json!({}),
+                },
+            ],
+        };
+        assert!(validate_pipeline_plan(&forward, &definitions).is_err());
+    }
+
+    #[test]
+    fn pipeline_resolves_nested_outputs_and_validates_tool_schema() {
+        let outputs = BTreeMap::from([(
+            "source".to_owned(),
+            json!({"items": [1, 2], "label": "данные"}),
+        )]);
+        let arguments = json!({
+            "payload": [{"$ref": "source.output"}],
+            "kind": "report"
+        });
+        let resolved = resolve_pipeline_arguments(&arguments, &outputs).unwrap();
+        assert_eq!(resolved["payload"][0]["items"], json!([1, 2]));
+        let definition = ToolDefinition {
+            name: "render".into(),
+            description: None,
+            input_schema: json!({
+                "type": "object",
+                "required": ["payload", "kind"],
+                "properties": {"kind": {"const": "report"}}
+            }),
+            read_only: true,
+            destructive: false,
+        };
+        validate_tool_arguments(&definition, &resolved).unwrap();
+        assert!(validate_tool_arguments(&definition, &json!({"kind": "other"})).is_err());
+    }
+
+    #[test]
+    fn providers_receive_pipeline_tool_only_with_enabled_mcp_tools() {
+        let settings = test_agent_settings();
+        let mut options = RequestOptions {
+            tools: vec![
+                pipeline_definitions()[0].clone(),
+                pipeline_tool_definition(),
+            ],
+            ..RequestOptions::default()
+        };
+        let history = vec![Message {
+            role: "user".into(),
+            content: "Сделай отчёт".into(),
+        }];
+        let openai = build_openai_payload_with_options(&settings, &history, &options);
+        assert!(openai["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == PIPELINE_TOOL_NAME));
+        let mut claude_settings = settings;
+        claude_settings.provider = Provider::Claude;
+        let claude = build_claude_payload_with_options(&claude_settings, &history, &options);
+        assert!(claude["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == PIPELINE_TOOL_NAME));
+
+        options.tools.clear();
+        assert!(
+            build_openai_payload_with_options(&claude_settings, &history, &options)
+                .get("tools")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_executes_pipeline_in_order_and_passes_exact_json_outputs() {
+        let pipeline = ToolCall {
+            id: "pipeline-1".into(),
+            name: PIPELINE_TOOL_NAME.into(),
+            arguments: json!({
+                "name": "report",
+                "steps": [
+                    {"id": "source", "tool": "source", "arguments": {"query": "rust"}},
+                    {"id": "render", "tool": "render", "arguments": {"data": {"$ref": "source.output"}}},
+                    {"id": "save", "tool": "save", "arguments": {"filename": "report.md", "content": {"$ref": "render.output"}}}
+                ]
+            }),
+        };
+        let client = ToolScriptClient::new(vec![
+            scripted_tool_answer(pipeline),
+            scripted_answer("Отчёт сохранён"),
+        ]);
+        let executor = Arc::new(PipelineExecutor {
+            definitions: pipeline_definitions(),
+            calls: Mutex::new(Vec::new()),
+            fail_tool: None,
+        });
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client.clone();
+        agent.set_tool_runtime(Some(executor.clone()), Arc::new(AutoApprove));
+
+        let answer = agent.ask("Сделай отчёт").await.unwrap();
+        assert_eq!(answer.text, "Отчёт сохранён");
+        let calls = executor.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["source", "render", "save"]
+        );
+        assert_eq!(calls[1].arguments["data"], json!({"items": [1, 2]}));
+        assert_eq!(calls[2].arguments["content"], "# Отчёт");
+        drop(calls);
+
+        let options = client.options.lock().unwrap();
+        assert!(options[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == PIPELINE_TOOL_NAME));
+        assert_eq!(options[1].tool_results[0].content["status"], "succeeded");
+        assert_eq!(
+            options[1].tool_results[0].content["steps"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(agent.persisted_history.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn invalid_pipeline_never_calls_executor() {
+        let client = ToolScriptClient::new(vec![
+            scripted_tool_answer(ToolCall {
+                id: "bad-plan".into(),
+                name: PIPELINE_TOOL_NAME.into(),
+                arguments: json!({
+                    "name": "bad",
+                    "steps": [{"id": "one", "tool": "missing", "arguments": {}}]
+                }),
+            }),
+            scripted_answer("План отклонён"),
+        ]);
+        let executor = Arc::new(PipelineExecutor {
+            definitions: pipeline_definitions(),
+            calls: Mutex::new(Vec::new()),
+            fail_tool: None,
+        });
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client.clone();
+        agent.set_tool_runtime(Some(executor.clone()), Arc::new(AutoApprove));
+        agent.ask("Сделай отчёт").await.unwrap();
+        assert!(executor.calls.lock().unwrap().is_empty());
+        assert!(client.options.lock().unwrap()[1].tool_results[0].is_error);
+    }
+
+    #[tokio::test]
+    async fn pipeline_stops_after_failure_and_marks_later_steps_skipped() {
+        let pipeline = ToolCall {
+            id: "pipeline-fail".into(),
+            name: PIPELINE_TOOL_NAME.into(),
+            arguments: json!({
+                "name": "report",
+                "steps": [
+                    {"id": "source", "tool": "source", "arguments": {"query": "rust"}},
+                    {"id": "render", "tool": "render", "arguments": {"data": {"$ref": "source.output"}}},
+                    {"id": "save", "tool": "save", "arguments": {"filename": "report.md", "content": {"$ref": "render.output"}}}
+                ]
+            }),
+        };
+        let client = ToolScriptClient::new(vec![
+            scripted_tool_answer(pipeline),
+            scripted_answer("Не удалось создать отчёт"),
+        ]);
+        let executor = Arc::new(PipelineExecutor {
+            definitions: pipeline_definitions(),
+            calls: Mutex::new(Vec::new()),
+            fail_tool: Some("render".into()),
+        });
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client.clone();
+        agent.set_tool_runtime(Some(executor.clone()), Arc::new(AutoApprove));
+        agent.ask("Сделай отчёт").await.unwrap();
+        assert_eq!(executor.calls.lock().unwrap().len(), 2);
+        let trace = &client.options.lock().unwrap()[1].tool_results[0].content;
+        assert_eq!(trace["status"], "failed");
+        assert_eq!(trace["steps"][2]["status"], "skipped");
+    }
+
+    #[tokio::test]
+    async fn pipeline_timeout_stops_before_later_steps() {
+        let client = ToolScriptClient::new(vec![
+            scripted_tool_answer(ToolCall {
+                id: "pipeline-timeout".into(),
+                name: PIPELINE_TOOL_NAME.into(),
+                arguments: json!({
+                    "name": "timeout",
+                    "steps": [
+                        {"id": "source", "tool": "source", "arguments": {"query": "rust"}},
+                        {"id": "render", "tool": "render", "arguments": {"data": {"$ref": "source.output"}}}
+                    ]
+                }),
+            }),
+            scripted_answer("Первый шаг превысил лимит времени"),
+        ]);
+        let executor = Arc::new(SlowPipelineExecutor {
+            calls: Mutex::new(Vec::new()),
+        });
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client.clone();
+        agent.set_tool_timeout(Duration::from_millis(5));
+        agent.set_tool_runtime(Some(executor.clone()), Arc::new(AutoApprove));
+
+        agent.ask("Сделай отчёт").await.unwrap();
+
+        assert_eq!(executor.calls.lock().unwrap().len(), 1);
+        let trace = &client.options.lock().unwrap()[1].tool_results[0].content;
+        assert_eq!(trace["status"], "failed");
+        assert!(trace["steps"][0]["output"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("истекло время"));
+        assert_eq!(trace["steps"][1]["status"], "skipped");
+    }
+
+    #[test]
+    fn github_activity_has_a_longer_but_bounded_timeout() {
+        assert_eq!(
+            mcp_tool_timeout("github_project_activity", DEFAULT_MCP_TOOL_TIMEOUT),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            mcp_tool_timeout("render_github_report", DEFAULT_MCP_TOOL_TIMEOUT),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            mcp_tool_timeout("github_project_activity", Duration::from_secs(180)),
+            Duration::from_secs(180)
+        );
+    }
+
+    #[tokio::test]
+    async fn real_mcp_pipeline_collects_renders_and_saves_after_approval() {
+        use axum::{http::StatusCode, routing::get, Json, Router};
+        use chrono::{Duration as ChronoDuration, Utc};
+        use tokio::net::TcpListener;
+
+        let now = Utc::now();
+        let week = now.timestamp();
+        let created = (now - ChronoDuration::hours(12)).to_rfc3339();
+        let merged = now.to_rfc3339();
+        let release_old = (now - ChronoDuration::days(10)).to_rfc3339();
+        let release_new = (now - ChronoDuration::days(2)).to_rfc3339();
+        let github_router = Router::new()
+            .route(
+                "/repos/acme/demo",
+                get(|| async {
+                    Json(json!({
+                        "description": "demo",
+                        "stargazers_count": 12,
+                        "forks_count": 3,
+                        "subscribers_count": 2,
+                        "open_issues_count": 4,
+                        "default_branch": "main",
+                        "created_at": "2025-01-01T00:00:00Z",
+                        "pushed_at": "2026-09-20T00:00:00Z"
+                    }))
+                }),
+            )
+            .route(
+                "/repos/acme/demo/languages",
+                get(|| async { Json(json!({"Rust": 1000})) }),
+            )
+            .route(
+                "/repos/acme/demo/stats/commit_activity",
+                get(move || async move { Json(json!([{"week": week, "total": 5}])) }),
+            )
+            .route(
+                "/repos/acme/demo/stats/contributors",
+                get(|| async { StatusCode::ACCEPTED }),
+            )
+            .route(
+                "/repos/acme/demo/commits",
+                get(|| async {
+                    Json(json!([
+                        {"author": {"login": "alice"}},
+                        {"author": {"login": "bob"}},
+                        {"author": {"login": "alice"}}
+                    ]))
+                }),
+            )
+            .route(
+                "/repos/acme/demo/issues",
+                get({
+                    let created = created.clone();
+                    move || {
+                        let created = created.clone();
+                        async move { Json(json!([{"created_at": created, "closed_at": created}])) }
+                    }
+                }),
+            )
+            .route(
+                "/repos/acme/demo/pulls",
+                get(move || {
+                    let created = created.clone();
+                    let merged = merged.clone();
+                    async move {
+                        Json(json!([{
+                            "created_at": created,
+                            "merged_at": merged,
+                            "updated_at": merged
+                        }]))
+                    }
+                }),
+            )
+            .route(
+                "/repos/acme/demo/actions/runs",
+                get(|| async { Json(json!({"workflow_runs": [{"conclusion": "success"}]})) }),
+            )
+            .route(
+                "/repos/acme/demo/releases",
+                get(move || {
+                    let old = release_old.clone();
+                    let new = release_new.clone();
+                    async move { Json(json!([{"published_at": old}, {"published_at": new}])) }
+                }),
+            );
+        let github_listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) => {
+                eprintln!("loopback GitHub pipeline test skipped: {error}");
+                return;
+            }
+        };
+        let github_address = github_listener.local_addr().unwrap();
+        let github_task = tokio::spawn(async move {
+            axum::serve(github_listener, github_router).await.unwrap();
+        });
+
+        let report_directory = tempfile::tempdir().unwrap();
+        let mcp_listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) => {
+                github_task.abort();
+                eprintln!("loopback MCP pipeline test skipped: {error}");
+                return;
+            }
+        };
+        let mcp_address = mcp_listener.local_addr().unwrap();
+        let github = GithubClient::with_base_url(&format!("http://{github_address}"))
+            .unwrap()
+            .with_stats_retry_delays(vec![Duration::ZERO; 3]);
+        let report_path = report_directory.path().to_path_buf();
+        let mcp_task = tokio::spawn(serve_mcp_listener_with_services_for_test(
+            mcp_listener,
+            github,
+            report_path,
+        ));
+
+        let enabled = [
+            "github_repository_metadata",
+            "github_project_activity",
+            "calculate_github_metrics",
+            "render_github_report",
+            "save_report_to_file",
+        ]
+        .map(str::to_owned);
+        let runtime = Arc::new(
+            McpRuntime::connect(&format!("http://{mcp_address}/mcp"), &enabled)
+                .await
+                .unwrap(),
+        );
+        let pipeline = ToolCall {
+            id: "github-report".into(),
+            name: PIPELINE_TOOL_NAME.into(),
+            arguments: json!({
+                "name": "github-project-report",
+                "steps": [
+                    {"id": "metadata", "tool": "github_repository_metadata", "arguments": {"repository": "acme/demo"}},
+                    {"id": "activity", "tool": "github_project_activity", "arguments": {"repository": "acme/demo", "period_days": 30}},
+                    {"id": "metrics", "tool": "calculate_github_metrics", "arguments": {"metadata": {"$ref": "metadata.output"}, "activity": {"$ref": "activity.output"}}},
+                    {"id": "report", "tool": "render_github_report", "arguments": {"metadata": {"$ref": "metadata.output"}, "activity": {"$ref": "activity.output"}, "metrics": {"$ref": "metrics.output"}}},
+                    {"id": "save", "tool": "save_report_to_file", "arguments": {"filename": "day19-report.md", "content": {"$ref": "report.output"}}}
+                ]
+            }),
+        };
+        let request_client = ToolScriptClient::new(vec![
+            scripted_tool_answer(pipeline),
+            scripted_answer("GitHub-отчёт сохранён"),
+        ]);
+        let approval = Arc::new(CountingApproval {
+            calls: AtomicUsize::new(0),
+        });
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = request_client.clone();
+        agent.set_tool_runtime(Some(runtime), approval.clone());
+
+        let answer = agent.ask("Подготовь GitHub-отчёт").await.unwrap();
+
+        assert_eq!(answer.text, "GitHub-отчёт сохранён");
+        assert_eq!(approval.calls.load(Ordering::SeqCst), 1);
+        let saved = fs::read_to_string(report_directory.path().join("day19-report.md")).unwrap();
+        assert!(saved.contains("# GitHub project report: acme/demo"));
+        assert!(saved.contains("## Development"));
+        assert!(saved.contains("Active contributors: 2.00 contributors (source)"));
+        assert!(saved.contains("## Data coverage"));
+        assert!(saved.contains("Issues opened: 1 issues (source)"));
+        assert!(saved.contains("contributor statistics ещё формируется GitHub"));
+        let trace = &request_client.options.lock().unwrap()[1].tool_results[0].content;
+        assert_eq!(trace["status"], "succeeded");
+        assert_eq!(trace["steps"].as_array().unwrap().len(), 5);
+
+        mcp_task.abort();
+        github_task.abort();
+    }
+
+    #[tokio::test]
+    async fn rejected_pipeline_write_stops_before_executor_call() {
+        let pipeline = ToolCall {
+            id: "pipeline-cancel".into(),
+            name: PIPELINE_TOOL_NAME.into(),
+            arguments: json!({
+                "name": "save",
+                "steps": [{"id": "save", "tool": "save", "arguments": {"filename": "report.md", "content": "x"}}]
+            }),
+        };
+        let client = ToolScriptClient::new(vec![
+            scripted_tool_answer(pipeline),
+            scripted_answer("Сохранение отменено"),
+        ]);
+        let executor = Arc::new(PipelineExecutor {
+            definitions: pipeline_definitions(),
+            calls: Mutex::new(Vec::new()),
+            fail_tool: None,
+        });
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client.clone();
+        agent.set_tool_runtime(Some(executor.clone()), Arc::new(RejectApproval));
+        agent.ask("Сохрани отчёт").await.unwrap();
+        assert!(executor.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            client.options.lock().unwrap()[1].tool_results[0].content["status"],
+            "cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_accepts_eight_steps_and_rejects_nine() {
+        let client = ToolScriptClient::new(vec![
+            scripted_tool_answer(sample_pipeline_call(MAX_PIPELINE_STEPS)),
+            scripted_answer("Готово"),
+        ]);
+        let executor = Arc::new(PipelineExecutor {
+            definitions: pipeline_definitions(),
+            calls: Mutex::new(Vec::new()),
+            fail_tool: None,
+        });
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client;
+        agent.set_tool_runtime(Some(executor.clone()), Arc::new(AutoApprove));
+        agent.ask("Выполни").await.unwrap();
+        assert_eq!(executor.calls.lock().unwrap().len(), MAX_PIPELINE_STEPS);
+
+        let client = ToolScriptClient::new(vec![
+            scripted_tool_answer(sample_pipeline_call(MAX_PIPELINE_STEPS + 1)),
+            scripted_answer("Отклонено"),
+        ]);
+        let executor = Arc::new(PipelineExecutor {
+            definitions: pipeline_definitions(),
+            calls: Mutex::new(Vec::new()),
+            fail_tool: None,
+        });
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client;
+        agent.set_tool_runtime(Some(executor.clone()), Arc::new(AutoApprove));
+        agent.ask("Выполни").await.unwrap();
+        assert!(executor.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pipeline_checks_resolved_step_against_invariants_before_execution() {
+        let pipeline = ToolCall {
+            id: "pipeline-invariant".into(),
+            name: PIPELINE_TOOL_NAME.into(),
+            arguments: json!({
+                "name": "save",
+                "steps": [{"id": "save", "tool": "save", "arguments": {"filename": "report.md", "content": "x"}}]
+            }),
+        };
+        let client = ToolScriptClient::new(vec![
+            scripted_tool_answer(pipeline),
+            scripted_answer(
+                r#"{"verdict":"violation","invariant_ids":[7],"reason":"запись запрещена"}"#,
+            ),
+            scripted_answer("Действие не выполнено"),
+            scripted_answer(r#"{"verdict":"allow","invariant_ids":[],"reason":""}"#),
+        ]);
+        let executor = Arc::new(PipelineExecutor {
+            definitions: pipeline_definitions(),
+            calls: Mutex::new(Vec::new()),
+            fail_tool: None,
+        });
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client.clone();
+        agent.set_invariants(sample_invariants());
+        agent.set_tool_runtime(Some(executor.clone()), Arc::new(AutoApprove));
+        agent.ask("Сохрани отчёт").await.unwrap();
+
+        assert!(executor.calls.lock().unwrap().is_empty());
+        let options = client.options.lock().unwrap();
+        assert!(options[1].tools.is_empty());
+        assert_eq!(options[2].tool_results[0].content["status"], "failed");
+        assert!(options[3].tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pipeline_reports_completed_write_when_final_synthesis_fails() {
+        let pipeline = ToolCall {
+            id: "pipeline-write".into(),
+            name: PIPELINE_TOOL_NAME.into(),
+            arguments: json!({
+                "name": "save",
+                "steps": [{"id": "save", "tool": "save", "arguments": {"filename": "report.md", "content": "x"}}]
+            }),
+        };
+        let client = ToolScriptClient::new(vec![
+            scripted_tool_answer(pipeline),
+            Err(anyhow::anyhow!("provider unavailable")),
+        ]);
+        let executor = Arc::new(PipelineExecutor {
+            definitions: pipeline_definitions(),
+            calls: Mutex::new(Vec::new()),
+            fail_tool: None,
+        });
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client;
+        agent.set_tool_runtime(Some(executor.clone()), Arc::new(AutoApprove));
+        let error = match agent.ask("Сохрани отчёт").await {
+            Ok(_) => panic!("ожидалась ошибка финального ответа"),
+            Err(error) => error,
+        };
+        assert_eq!(executor.calls.lock().unwrap().len(), 1);
+        assert!(error.to_string().contains("внешнее действие уже выполнено"));
+    }
+
+    #[tokio::test]
+    async fn agent_allows_exactly_three_top_level_tool_calls() {
+        let calls = (0..3)
+            .map(|index| ToolCall {
+                id: format!("call-{index}"),
+                name: "echo".into(),
+                arguments: json!({"text": "x"}),
+            })
+            .collect::<Vec<_>>();
+        let first = ApiAnswer {
+            text: String::new(),
+            task_update: None,
+            task_update_warning: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            session_input_tokens: 0,
+            session_output_tokens: 0,
+            tool_calls: calls,
+        };
+        let client = ToolScriptClient::new(vec![Ok(first), scripted_answer("Готово")]);
+        let executor = Arc::new(RecordingExecutor {
+            definitions: vec![ToolDefinition {
+                name: "echo".into(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+                read_only: true,
+                destructive: false,
+            }],
+            calls: Mutex::new(Vec::new()),
+        });
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client;
+        agent.set_tool_runtime(Some(executor.clone()), Arc::new(AutoApprove));
+        assert_eq!(agent.ask("Повтори").await.unwrap().text, "Готово");
+        assert_eq!(executor.calls.lock().unwrap().len(), 3);
     }
 
     #[test]

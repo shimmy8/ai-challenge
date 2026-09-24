@@ -20,7 +20,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 pub(crate) type RequestFuture<'a> = Pin<Box<dyn Future<Output = Result<ApiAnswer>> + Send + 'a>>;
 
@@ -76,6 +76,42 @@ pub(crate) struct ApiAnswer {
     pub(crate) session_input_tokens: u64,
     pub(crate) session_output_tokens: u64,
     pub(crate) tool_calls: Vec<ToolCall>,
+}
+
+fn pipeline_result(
+    call_id: &str,
+    plan: &PipelinePlan,
+    mut traces: Vec<PipelineStepTrace>,
+    skipped_from: usize,
+    status: PipelineStatus,
+    error: Option<String>,
+) -> ToolResult {
+    traces.extend(
+        plan.steps
+            .iter()
+            .skip(skipped_from)
+            .map(|step| PipelineStepTrace {
+                id: step.id.clone(),
+                tool: step.tool.clone(),
+                status: PipelineStepStatus::Skipped,
+                arguments: step.arguments.clone(),
+                output: None,
+                error: None,
+                state_changed: false,
+            }),
+    );
+    let trace = PipelineTrace {
+        name: plan.name.clone(),
+        status,
+        steps: traces,
+        error,
+    };
+    ToolResult {
+        call_id: call_id.to_owned(),
+        content: serde_json::to_value(trace)
+            .unwrap_or_else(|error| json!({"status": "failed", "error": error.to_string()})),
+        is_error: status != PipelineStatus::Succeeded,
+    }
 }
 
 pub(crate) fn process_task_answer(answer: &mut ApiAnswer, phase: TaskPhase) {
@@ -286,6 +322,7 @@ pub(crate) struct Agent {
     pub(crate) memory: ActiveMemory,
     pub(crate) tool_executor: Option<SharedToolExecutor>,
     pub(crate) tool_approval: SharedToolApproval,
+    tool_timeout: Duration,
 }
 
 impl Agent {
@@ -310,7 +347,13 @@ impl Agent {
             memory: ActiveMemory::default(),
             tool_executor: None,
             tool_approval: Arc::new(AutoApprove),
+            tool_timeout: DEFAULT_MCP_TOOL_TIMEOUT,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_tool_timeout(&mut self, timeout: Duration) {
+        self.tool_timeout = timeout;
     }
 
     pub(crate) async fn ask(&mut self, input: &str) -> Result<ApiAnswer> {
@@ -345,8 +388,12 @@ impl Agent {
             .as_ref()
             .map(|executor| executor.definitions())
             .unwrap_or_default();
+        let mut advertised_tools = tool_definitions.clone();
+        if !advertised_tools.is_empty() {
+            advertised_tools.push(pipeline_tool_definition());
+        }
         let mut request_options = RequestOptions {
-            tools: tool_definitions.clone(),
+            tools: advertised_tools,
             ..RequestOptions::default()
         };
         let mut external_action_completed = false;
@@ -369,6 +416,23 @@ impl Agent {
             let mut results = Vec::with_capacity(answer.tool_calls.len());
             for call in &answer.tool_calls {
                 tool_calls_count += 1;
+                if call.name == PIPELINE_TOOL_NAME {
+                    let executor = self
+                        .tool_executor
+                        .clone()
+                        .ok_or_else(|| anyhow!("MCP-пайплайн недоступен"))?;
+                    let result = self
+                        .execute_pipeline_call(
+                            input,
+                            call,
+                            &tool_definitions,
+                            executor,
+                            &mut external_action_completed,
+                        )
+                        .await;
+                    results.push(result);
+                    continue;
+                }
                 let definition = tool_definitions
                     .iter()
                     .find(|definition| definition.name == call.name)
@@ -490,6 +554,241 @@ impl Agent {
         self.save_active_branch();
         self.status = AgentStatus::Completed;
         Ok(answer)
+    }
+
+    async fn execute_pipeline_call(
+        &mut self,
+        input: &str,
+        call: &ToolCall,
+        definitions: &[ToolDefinition],
+        executor: SharedToolExecutor,
+        external_action_completed: &mut bool,
+    ) -> ToolResult {
+        let plan = match parse_pipeline_plan(&call.arguments) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return ToolResult {
+                    call_id: call.id.clone(),
+                    content: json!({"status": "failed", "error": error.to_string()}),
+                    is_error: true,
+                };
+            }
+        };
+        if let Err(error) = validate_pipeline_plan(&plan, definitions) {
+            return pipeline_result(
+                &call.id,
+                &plan,
+                Vec::new(),
+                0,
+                PipelineStatus::Failed,
+                Some(error.to_string()),
+            );
+        }
+
+        let mut outputs = BTreeMap::new();
+        let mut traces = Vec::with_capacity(plan.steps.len());
+        for (index, step) in plan.steps.iter().enumerate() {
+            let definition = match definitions
+                .iter()
+                .find(|definition| definition.name == step.tool)
+            {
+                Some(definition) => definition,
+                None => {
+                    return pipeline_result(
+                        &call.id,
+                        &plan,
+                        traces,
+                        index,
+                        PipelineStatus::Failed,
+                        Some(format!("MCP-инструмент «{}» не разрешён", step.tool)),
+                    );
+                }
+            };
+            let arguments = match resolve_pipeline_arguments(&step.arguments, &outputs) {
+                Ok(arguments) => arguments,
+                Err(error) => {
+                    traces.push(PipelineStepTrace {
+                        id: step.id.clone(),
+                        tool: step.tool.clone(),
+                        status: PipelineStepStatus::Failed,
+                        arguments: step.arguments.clone(),
+                        output: None,
+                        error: Some(error.to_string()),
+                        state_changed: false,
+                    });
+                    return pipeline_result(
+                        &call.id,
+                        &plan,
+                        traces,
+                        index + 1,
+                        PipelineStatus::Failed,
+                        Some(format!("не удалось подготовить шаг «{}»", step.id)),
+                    );
+                }
+            };
+            if let Err(error) = validate_tool_arguments(definition, &arguments) {
+                traces.push(PipelineStepTrace {
+                    id: step.id.clone(),
+                    tool: step.tool.clone(),
+                    status: PipelineStepStatus::Failed,
+                    arguments,
+                    output: None,
+                    error: Some(error.to_string()),
+                    state_changed: false,
+                });
+                return pipeline_result(
+                    &call.id,
+                    &plan,
+                    traces,
+                    index + 1,
+                    PipelineStatus::Failed,
+                    Some(format!("аргументы шага «{}» не прошли проверку", step.id)),
+                );
+            }
+            let step_call = ToolCall {
+                id: format!("{}:{}", call.id, step.id),
+                name: step.tool.clone(),
+                arguments: arguments.clone(),
+            };
+
+            if !self.invariants.is_empty() {
+                let verdict = match self.verify_tool_call(input, &step_call).await {
+                    Ok(verdict) => verdict,
+                    Err(error) => {
+                        traces.push(PipelineStepTrace {
+                            id: step.id.clone(),
+                            tool: step.tool.clone(),
+                            status: PipelineStepStatus::Failed,
+                            arguments,
+                            output: None,
+                            error: Some(error.to_string()),
+                            state_changed: false,
+                        });
+                        return pipeline_result(
+                            &call.id,
+                            &plan,
+                            traces,
+                            index + 1,
+                            PipelineStatus::Failed,
+                            Some(format!("проверка шага «{}» завершилась ошибкой", step.id)),
+                        );
+                    }
+                };
+                if verdict.verdict != VerificationVerdict::Allow {
+                    let message = if verdict.verdict == VerificationVerdict::Violation {
+                        invariant_refusal(&self.invariants, &verdict.invariant_ids)
+                            .unwrap_or(verdict.reason)
+                    } else {
+                        verdict.reason
+                    };
+                    traces.push(PipelineStepTrace {
+                        id: step.id.clone(),
+                        tool: step.tool.clone(),
+                        status: PipelineStepStatus::Failed,
+                        arguments,
+                        output: None,
+                        error: Some(message.clone()),
+                        state_changed: false,
+                    });
+                    return pipeline_result(
+                        &call.id,
+                        &plan,
+                        traces,
+                        index + 1,
+                        PipelineStatus::Failed,
+                        Some(message),
+                    );
+                }
+            }
+
+            let approved = definition.read_only
+                || self
+                    .tool_approval
+                    .approve(definition, &step_call)
+                    .unwrap_or(false);
+            if !approved {
+                traces.push(PipelineStepTrace {
+                    id: step.id.clone(),
+                    tool: step.tool.clone(),
+                    status: PipelineStepStatus::Cancelled,
+                    arguments,
+                    output: None,
+                    error: Some("действие отменено пользователем".into()),
+                    state_changed: false,
+                });
+                return pipeline_result(
+                    &call.id,
+                    &plan,
+                    traces,
+                    index + 1,
+                    PipelineStatus::Cancelled,
+                    Some("пайплайн отменён пользователем".into()),
+                );
+            }
+
+            let step_timeout = mcp_tool_timeout(&step_call.name, self.tool_timeout);
+            let result =
+                match tokio::time::timeout(step_timeout, executor.execute(&step_call)).await {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(error)) => ToolResult {
+                        call_id: step_call.id.clone(),
+                        content: json!({"error": error.to_string()}),
+                        is_error: true,
+                    },
+                    Err(_) => ToolResult {
+                        call_id: step_call.id.clone(),
+                        content: json!({
+                            "error": format!(
+                                "истекло время выполнения MCP-инструмента ({} с)",
+                                step_timeout.as_secs_f64()
+                            )
+                        }),
+                        is_error: true,
+                    },
+                };
+            if result.is_error {
+                traces.push(PipelineStepTrace {
+                    id: step.id.clone(),
+                    tool: step.tool.clone(),
+                    status: PipelineStepStatus::Failed,
+                    arguments,
+                    output: Some(result.content),
+                    error: Some("MCP-инструмент вернул ошибку".into()),
+                    state_changed: false,
+                });
+                return pipeline_result(
+                    &call.id,
+                    &plan,
+                    traces,
+                    index + 1,
+                    PipelineStatus::Failed,
+                    Some(format!("шаг «{}» завершился ошибкой", step.id)),
+                );
+            }
+            let state_changed = !definition.read_only;
+            if state_changed {
+                *external_action_completed = true;
+            }
+            outputs.insert(step.id.clone(), result.content.clone());
+            traces.push(PipelineStepTrace {
+                id: step.id.clone(),
+                tool: step.tool.clone(),
+                status: PipelineStepStatus::Succeeded,
+                arguments,
+                output: Some(result.content),
+                error: None,
+                state_changed,
+            });
+        }
+
+        pipeline_result(
+            &call.id,
+            &plan,
+            traces,
+            plan.steps.len(),
+            PipelineStatus::Succeeded,
+            None,
+        )
     }
 
     async fn verify_draft(

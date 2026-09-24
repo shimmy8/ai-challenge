@@ -14,6 +14,8 @@ use std::path::Path;
 
 mod background;
 mod calendar;
+mod github;
+mod report;
 mod scheduler;
 mod server;
 mod tools;
@@ -22,7 +24,11 @@ pub(crate) use calendar::load_mcp_env_file;
 pub(crate) use calendar::{
     CalDavClient, CalendarDigestEvent, CalendarEventRequest, CalendarEventResult,
 };
+pub(crate) use github::*;
+pub(crate) use report::*;
 pub(crate) use scheduler::*;
+#[cfg(test)]
+pub(crate) use server::serve_mcp_listener_with_services_for_test;
 pub(crate) use server::{run_mcp_server, serve_mcp_listener};
 pub(crate) use tools::*;
 
@@ -145,7 +151,7 @@ impl McpSession {
             .cloned()
             .ok_or_else(|| anyhow!("аргументы MCP-инструмента должны быть JSON-объектом"))?;
         let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            mcp_tool_timeout(&call.name, DEFAULT_MCP_TOOL_TIMEOUT),
             self.client
                 .call_tool(CallToolRequestParams::new(call.name.clone()).with_arguments(arguments)),
         )
@@ -496,7 +502,7 @@ mod tests {
         let url = format!("http://{address}/mcp");
 
         let tools = fetch_tools(&url).await.unwrap();
-        assert!(tools.len() >= 2);
+        assert!(tools.len() >= 7);
         let echo = tools.iter().find(|tool| tool.name == "echo").unwrap();
         assert!(echo
             .description
@@ -511,6 +517,25 @@ mod tests {
             calendar.input_schema["required"],
             json!(["title", "start_at", "end_at"])
         );
+        for name in [
+            "github_repository_metadata",
+            "github_project_activity",
+            "calculate_github_metrics",
+            "render_github_report",
+        ] {
+            let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+            assert!(tool.read_only, "{name} должен быть read-only");
+            assert_eq!(tool.input_schema["type"], "object");
+        }
+        let save = tools
+            .iter()
+            .find(|tool| tool.name == "save_report_to_file")
+            .unwrap();
+        assert!(!save.read_only);
+        assert_eq!(
+            save.input_schema["required"],
+            json!(["filename", "content"])
+        );
 
         let transport = StreamableHttpClientTransport::from_config(
             StreamableHttpClientTransportConfig::with_uri(url),
@@ -524,6 +549,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.content[0].as_text().unwrap().text, "проверка");
+        let metrics = client
+            .call_tool(
+                CallToolRequestParams::new("calculate_github_metrics").with_arguments(
+                    json!({
+                        "metadata": {
+                            "repository": "owner/repo",
+                            "description": null,
+                            "stars": 10,
+                            "forks": 2,
+                            "subscribers": 3,
+                            "open_issues_and_pulls": 4,
+                            "default_branch": "main",
+                            "created_at": "2025-01-01T00:00:00Z",
+                            "pushed_at": null,
+                            "languages": {"Rust": 100}
+                        },
+                        "activity": {
+                            "repository": "owner/repo",
+                            "period_days": 30,
+                            "since": "2026-01-01T00:00:00Z",
+                            "commits": 12,
+                            "active_contributors": 3,
+                            "issues_opened": 4,
+                            "issues_closed": 2,
+                            "pull_requests_opened": 5,
+                            "pull_requests_merged": 4,
+                            "merge_hours": [2.0, 6.0],
+                            "workflow_runs": 10,
+                            "workflow_successes": 8,
+                            "release_times": ["2026-01-01T00:00:00Z", "2026-01-11T00:00:00Z"],
+                            "truncated": false,
+                            "warnings": []
+                        }
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metrics.is_error, Some(false));
+        let metrics = metrics.structured_content.unwrap();
+        assert_eq!(metrics["commits"]["value"], 12.0);
+        assert_eq!(metrics["ci_success_rate"]["value"], 80.0);
         let _ = client.cancel().await;
         task.abort();
     }
