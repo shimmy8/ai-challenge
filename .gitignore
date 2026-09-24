@@ -4,6 +4,12 @@
 .fox-sessions.db
 .fox-sessions.db-shm
 .fox-sessions.db-wal
+.fox-scheduler.db
+.fox-scheduler.db-shm
+.fox-scheduler.db-wal
+.fox-scheduler-test-*.db
+.fox-scheduler-test-*.db-shm
+.fox-scheduler-test-*.db-wal
 fox-metrics.log
 mcp.log
 .env

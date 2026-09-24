@@ -26,6 +26,7 @@ pub(crate) fn default_context_messages() -> usize {
 pub(crate) const CONFIG_FILE: &str = ".fox-llm.json";
 pub(crate) const MODES_FILE: &str = "fox-modes.json";
 pub(crate) const SESSIONS_FILE: &str = ".fox-sessions.db";
+pub(crate) const SCHEDULER_FILE: &str = ".fox-scheduler.db";
 pub(crate) const METRICS_LOG_FILE: &str = "fox-metrics.log";
 pub(crate) const OPENAI_KEYS_URL: &str = "https://platform.openai.com/api-keys";
 pub(crate) const CLAUDE_KEYS_URL: &str = "https://console.anthropic.com/settings/keys";
