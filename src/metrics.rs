@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use std::{
     fs,
     io::Write,
+    net::SocketAddr,
     path::{Path, PathBuf},
 };
 
@@ -17,38 +18,44 @@ pub(crate) fn metrics_path() -> Result<PathBuf> {
 pub(crate) fn parse_dump_metrics_flag(args: impl IntoIterator<Item = String>) -> Result<bool> {
     match parse_startup_mode(args)? {
         StartupMode::Interactive { dump_metrics } => Ok(dump_metrics),
-        StartupMode::McpServer => bail!("режим MCP-сервера нельзя использовать как флаг метрик"),
+        StartupMode::McpServer { .. } => {
+            bail!("режим MCP-сервера нельзя использовать как флаг метрик")
+        }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StartupMode {
-    Interactive { dump_metrics: bool },
-    McpServer,
+    Interactive {
+        dump_metrics: bool,
+    },
+    McpServer {
+        kind: crate::mcp::McpServerKind,
+        addr: SocketAddr,
+    },
 }
 
 pub(crate) fn parse_startup_mode(args: impl IntoIterator<Item = String>) -> Result<StartupMode> {
+    let args = args.into_iter().collect::<Vec<_>>();
+    if args.first().is_some_and(|value| value == "--mcp-server") {
+        anyhow::ensure!(
+            args.len() == 4 && args[2] == "--addr",
+            "использование: --mcp-server <kind> --addr <loopback:port>"
+        );
+        return Ok(StartupMode::McpServer {
+            kind: args[1].parse()?,
+            addr: crate::mcp::validate_mcp_bind_addr(&args[3])?,
+        });
+    }
     let mut dump_metrics = false;
-    let mut mcp_server = false;
     for argument in args {
         match argument.as_str() {
             "--dump-metrics" if !dump_metrics => dump_metrics = true,
-            "--mcp-server" if !mcp_server => mcp_server = true,
-            "--dump-metrics" | "--mcp-server" => {
-                bail!("аргумент указан более одного раза: {argument}")
-            }
-            _ => bail!("неизвестный аргумент: {argument}. Доступны --dump-metrics и --mcp-server"),
+            "--dump-metrics" => bail!("аргумент указан более одного раза: {argument}"),
+            _ => bail!("неизвестный аргумент: {argument}. Доступны --dump-metrics и --mcp-server <kind> --addr <loopback:port>"),
         }
     }
-    anyhow::ensure!(
-        !(dump_metrics && mcp_server),
-        "--dump-metrics и --mcp-server нельзя использовать вместе"
-    );
-    Ok(if mcp_server {
-        StartupMode::McpServer
-    } else {
-        StartupMode::Interactive { dump_metrics }
-    })
+    Ok(StartupMode::Interactive { dump_metrics })
 }
 
 pub(crate) fn append_metrics_log(path: &Path, entry: &MetricsLogEntry<'_>) -> Result<()> {

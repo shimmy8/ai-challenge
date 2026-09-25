@@ -130,11 +130,49 @@ pub(crate) struct Config {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct McpConfig {
     #[serde(default)]
-    pub(crate) server_url: Option<String>,
+    pub(crate) servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct McpServerConfig {
+    pub(crate) id: String,
+    pub(crate) url: String,
     #[serde(default)]
-    pub(crate) enabled_tools: Vec<String>,
+    pub(crate) disabled_tools: Vec<String>,
+}
+
+impl McpConfig {
+    pub(crate) fn validate(&self) -> Result<()> {
+        let mut ids = std::collections::BTreeSet::new();
+        for server in &self.servers {
+            validate_mcp_server_id(&server.id)?;
+            anyhow::ensure!(
+                ids.insert(server.id.as_str()),
+                "повторяющийся ID MCP-сервера: {}",
+                server.id
+            );
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_mcp_server_id(value: &str) -> Result<()> {
+    anyhow::ensure!(!value.is_empty(), "ID MCP-сервера не должен быть пустым");
+    anyhow::ensure!(
+        !value.contains("__"),
+        "ID MCP-сервера не должен содержать __"
+    );
+    anyhow::ensure!(
+        value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'),
+        "ID MCP-сервера может содержать только строчные ASCII-буквы, цифры и _"
+    );
+    Ok(())
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -206,6 +244,23 @@ impl Default for Config {
 }
 
 impl Config {
+    pub(crate) fn load_without_mcp_registry(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("не удалось прочитать {}", path.display()))?;
+        let mut value: Value = serde_json::from_str(&raw).context("повреждён файл конфигурации")?;
+        if value.get("providers").is_some() {
+            value["mcp"] = json!({"servers": []});
+            let config: Self =
+                serde_json::from_value(value).context("повреждён файл конфигурации")?;
+            anyhow::ensure!(config.context_messages <= 1000, "размер окна вне диапазона");
+            return Ok(config);
+        }
+        Self::load(path)
+    }
+
     pub(crate) fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -217,6 +272,7 @@ impl Config {
             let config: Self =
                 serde_json::from_value(value).context("повреждён файл конфигурации")?;
             anyhow::ensure!(config.context_messages <= 1000, "размер окна вне диапазона");
+            config.mcp.validate()?;
             return Ok(config);
         }
 
@@ -250,6 +306,7 @@ impl Config {
     }
 
     pub(crate) fn save(&self, path: &Path) -> Result<()> {
+        self.mcp.validate()?;
         let raw = serde_json::to_vec_pretty(self)?;
         let mut options = fs::OpenOptions::new();
         options.create(true).truncate(true).write(true);
