@@ -143,6 +143,7 @@ mod suite {
                     call_id: call.id.clone(),
                     content: json!({"created": true}),
                     is_error: false,
+                    outcome: ToolOutcome::Success,
                 })
             })
         }
@@ -171,6 +172,11 @@ mod suite {
                         result
                     },
                     is_error: fail,
+                    outcome: if fail {
+                        ToolOutcome::Failed
+                    } else {
+                        ToolOutcome::Success
+                    },
                 })
             })
         }
@@ -189,6 +195,7 @@ mod suite {
                     call_id: call.id.clone(),
                     content: json!({"late": true}),
                     is_error: false,
+                    outcome: ToolOutcome::Success,
                 })
             })
         }
@@ -306,6 +313,7 @@ mod suite {
             call_id: "call-1".into(),
             content: json!({"event_id": "event-1"}),
             is_error: false,
+            outcome: ToolOutcome::Success,
         });
         let payload = build_openai_payload_with_options(
             &test_agent_settings(),
@@ -432,11 +440,11 @@ mod suite {
     }
 
     #[tokio::test]
-    async fn agent_rejects_more_than_three_tool_calls() {
-        let calls = (0..4)
+    async fn agent_rejects_tool_calls_above_request_limit() {
+        let calls = (0..=MAX_MCP_CALLS_PER_REQUEST)
             .map(|index| ToolCall {
                 id: format!("call-{index}"),
-                name: "echo".into(),
+                name: "read".into(),
                 arguments: json!({"text": "x"}),
             })
             .collect::<Vec<_>>();
@@ -453,7 +461,7 @@ mod suite {
         let client = ToolScriptClient::new(vec![Ok(first)]);
         let executor = Arc::new(RecordingExecutor {
             definitions: vec![ToolDefinition {
-                name: "echo".into(),
+                name: "read".into(),
                 description: None,
                 input_schema: json!({"type": "object"}),
                 read_only: true,
@@ -479,6 +487,7 @@ mod suite {
                 id: "source".into(),
                 tool: "echo".into(),
                 arguments: json!({"text": "данные"}),
+                capture_output: false,
             }],
         };
         let encoded = serde_json::to_value(&plan).unwrap();
@@ -506,6 +515,7 @@ mod suite {
                 id: "one".into(),
                 tool: "missing".into(),
                 arguments: json!({}),
+                capture_output: false,
             }],
         };
         assert!(validate_pipeline_plan(&disabled, &definitions).is_err());
@@ -517,11 +527,13 @@ mod suite {
                     id: "same".into(),
                     tool: "echo".into(),
                     arguments: json!({}),
+                    capture_output: false,
                 },
                 PipelineStep {
                     id: "same".into(),
                     tool: "echo".into(),
                     arguments: json!({}),
+                    capture_output: false,
                 },
             ],
         };
@@ -534,11 +546,13 @@ mod suite {
                     id: "first".into(),
                     tool: "echo".into(),
                     arguments: json!({"value": {"$ref": "second.output"}}),
+                    capture_output: false,
                 },
                 PipelineStep {
                     id: "second".into(),
                     tool: "echo".into(),
                     arguments: json!({}),
+                    capture_output: false,
                 },
             ],
         };
@@ -876,7 +890,7 @@ mod suite {
         });
 
         let report_directory = tempfile::tempdir().unwrap();
-        let mcp_listener = match TcpListener::bind("127.0.0.1:0").await {
+        let github_mcp_listener = match TcpListener::bind("127.0.0.1:0").await {
             Ok(listener) => listener,
             Err(error) => {
                 github_task.abort();
@@ -884,29 +898,46 @@ mod suite {
                 return;
             }
         };
-        let mcp_address = mcp_listener.local_addr().unwrap();
+        let reporting_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let workspace_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let github_mcp_address = github_mcp_listener.local_addr().unwrap();
+        let reporting_address = reporting_listener.local_addr().unwrap();
+        let workspace_address = workspace_listener.local_addr().unwrap();
         let github = GithubClient::with_base_url(&format!("http://{github_address}"))
             .unwrap()
             .with_stats_retry_delays(vec![Duration::ZERO; 3]);
         let report_path = report_directory.path().to_path_buf();
-        let mcp_task = tokio::spawn(serve_mcp_listener_with_services_for_test(
-            mcp_listener,
-            github,
+        let github_mcp_task = tokio::spawn(serve_github_for_test(github_mcp_listener, github));
+        let reporting_task = tokio::spawn(serve_group_for_test(
+            McpServerKind::Reporting,
+            reporting_listener,
+            report_path.clone(),
+        ));
+        let workspace_task = tokio::spawn(serve_group_for_test(
+            McpServerKind::Workspace,
+            workspace_listener,
             report_path,
         ));
 
-        let enabled = [
-            "github_repository_metadata",
-            "github_project_activity",
-            "calculate_github_metrics",
-            "render_github_report",
-            "save_report_to_file",
-        ]
-        .map(str::to_owned);
         let runtime = Arc::new(
-            McpRuntime::connect(&format!("http://{mcp_address}/mcp"), &enabled)
-                .await
-                .unwrap(),
+            McpRouter::connect(&[
+                McpServerConfig {
+                    id: "github".into(),
+                    url: format!("http://{github_mcp_address}/mcp"),
+                    disabled_tools: Vec::new(),
+                },
+                McpServerConfig {
+                    id: "reporting".into(),
+                    url: format!("http://{reporting_address}/mcp"),
+                    disabled_tools: Vec::new(),
+                },
+                McpServerConfig {
+                    id: "workspace".into(),
+                    url: format!("http://{workspace_address}/mcp"),
+                    disabled_tools: Vec::new(),
+                },
+            ])
+            .await,
         );
         let pipeline = ToolCall {
             id: "github-report".into(),
@@ -914,11 +945,11 @@ mod suite {
             arguments: json!({
                 "name": "github-project-report",
                 "steps": [
-                    {"id": "metadata", "tool": "github_repository_metadata", "arguments": {"repository": "acme/demo"}},
-                    {"id": "activity", "tool": "github_project_activity", "arguments": {"repository": "acme/demo", "period_days": 30}},
-                    {"id": "metrics", "tool": "calculate_github_metrics", "arguments": {"metadata": {"$ref": "metadata.output"}, "activity": {"$ref": "activity.output"}}},
-                    {"id": "report", "tool": "render_github_report", "arguments": {"metadata": {"$ref": "metadata.output"}, "activity": {"$ref": "activity.output"}, "metrics": {"$ref": "metrics.output"}}},
-                    {"id": "save", "tool": "save_report_to_file", "arguments": {"filename": "day19-report.md", "content": {"$ref": "report.output"}}}
+                    {"id": "metadata", "tool": "github__repository_metadata", "arguments": {"repository": "acme/demo"}},
+                    {"id": "activity", "tool": "github__project_activity", "arguments": {"repository": "acme/demo", "period_days": 30}},
+                    {"id": "metrics", "tool": "reporting__calculate_github_metrics", "arguments": {"metadata": {"$ref": "metadata.output"}, "activity": {"$ref": "activity.output"}}},
+                    {"id": "report", "tool": "reporting__render_github_report", "arguments": {"metadata": {"$ref": "metadata.output"}, "activity": {"$ref": "activity.output"}, "metrics": {"$ref": "metrics.output"}}},
+                    {"id": "save", "tool": "workspace__save_report", "arguments": {"filename": "day19-report.md", "content": {"$ref": "report.output"}}}
                 ]
             }),
         };
@@ -948,7 +979,9 @@ mod suite {
         assert_eq!(trace["status"], "succeeded");
         assert_eq!(trace["steps"].as_array().unwrap().len(), 5);
 
-        mcp_task.abort();
+        github_mcp_task.abort();
+        reporting_task.abort();
+        workspace_task.abort();
         github_task.abort();
     }
 
@@ -1082,11 +1115,11 @@ mod suite {
     }
 
     #[tokio::test]
-    async fn agent_allows_exactly_three_top_level_tool_calls() {
-        let calls = (0..3)
+    async fn agent_allows_top_level_tool_calls_up_to_request_limit() {
+        let calls = (0..MAX_MCP_CALLS_PER_REQUEST)
             .map(|index| ToolCall {
                 id: format!("call-{index}"),
-                name: "echo".into(),
+                name: "read".into(),
                 arguments: json!({"text": "x"}),
             })
             .collect::<Vec<_>>();
@@ -1103,7 +1136,7 @@ mod suite {
         let client = ToolScriptClient::new(vec![Ok(first), scripted_answer("Готово")]);
         let executor = Arc::new(RecordingExecutor {
             definitions: vec![ToolDefinition {
-                name: "echo".into(),
+                name: "read".into(),
                 description: None,
                 input_schema: json!({"type": "object"}),
                 read_only: true,
@@ -1115,7 +1148,10 @@ mod suite {
         agent.request_client = client;
         agent.set_tool_runtime(Some(executor.clone()), Arc::new(AutoApprove));
         assert_eq!(agent.ask("Повтори").await.unwrap().text, "Готово");
-        assert_eq!(executor.calls.lock().unwrap().len(), 3);
+        assert_eq!(
+            executor.calls.lock().unwrap().len(),
+            MAX_MCP_CALLS_PER_REQUEST
+        );
     }
 
     #[test]
@@ -1146,6 +1182,7 @@ mod suite {
             call_id: "toolu-1".into(),
             content: json!("создано"),
             is_error: false,
+            outcome: ToolOutcome::Success,
         });
         let payload = build_claude_payload_with_options(&test_agent_settings(), &[], &options);
         assert_eq!(payload["messages"][0]["role"], "assistant");
@@ -1168,11 +1205,33 @@ mod suite {
             }
         );
         assert_eq!(
-            parse_startup_mode(vec!["--mcp-server".into()]).unwrap(),
-            StartupMode::McpServer
+            parse_startup_mode(vec![
+                "--mcp-server".into(),
+                "github".into(),
+                "--addr".into(),
+                "127.0.0.1:8001".into()
+            ])
+            .unwrap(),
+            StartupMode::McpServer {
+                kind: McpServerKind::Github,
+                addr: "127.0.0.1:8001".parse().unwrap()
+            }
         );
         assert!(parse_startup_mode(vec!["--dump-metrics".into(), "--mcp-server".into()]).is_err());
-        assert!(parse_startup_mode(vec!["--mcp-server".into(), "--mcp-server".into()]).is_err());
+        assert!(parse_startup_mode(vec![
+            "--mcp-server".into(),
+            "github".into(),
+            "--addr".into(),
+            "0.0.0.0:8001".into()
+        ])
+        .is_err());
+        assert!(parse_startup_mode(vec![
+            "--mcp-server".into(),
+            "unknown".into(),
+            "--addr".into(),
+            "127.0.0.1:8001".into()
+        ])
+        .is_err());
     }
 
     #[test]
@@ -1256,13 +1315,61 @@ mod suite {
         let path = dir.path().join("mcp-config.json");
         let config = Config {
             mcp: McpConfig {
-                server_url: Some("http://127.0.0.1:8000/mcp".into()),
-                enabled_tools: vec!["echo".into()],
+                servers: vec![McpServerConfig {
+                    id: "github".into(),
+                    url: "http://127.0.0.1:8000/mcp".into(),
+                    disabled_tools: vec!["project_activity".into()],
+                }],
             },
             ..Config::default()
         };
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap().mcp, config.mcp);
+
+        let duplicate = Config {
+            mcp: McpConfig {
+                servers: vec![
+                    McpServerConfig {
+                        id: "same".into(),
+                        url: "http://one.test/mcp".into(),
+                        disabled_tools: vec![],
+                    },
+                    McpServerConfig {
+                        id: "same".into(),
+                        url: "http://two.test/mcp".into(),
+                        disabled_tools: vec![],
+                    },
+                ],
+            },
+            ..Config::default()
+        };
+        assert!(duplicate.save(&dir.path().join("duplicate.json")).is_err());
+
+        let invalid = Config {
+            mcp: McpConfig {
+                servers: vec![McpServerConfig {
+                    id: "bad__ID".into(),
+                    url: "http://bad.test/mcp".into(),
+                    disabled_tools: vec![],
+                }],
+            },
+            ..Config::default()
+        };
+        assert!(invalid.save(&dir.path().join("invalid.json")).is_err());
+
+        let legacy_mcp_path = dir.path().join("legacy-mcp.json");
+        fs::write(
+            &legacy_mcp_path,
+            serde_json::to_vec(&json!({
+                "last_provider": null,
+                "last_mode": null,
+                "providers": [],
+                "mcp": {"server_url": "http://127.0.0.1:8000/mcp", "enabled_tools": ["echo"]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(Config::load(&legacy_mcp_path).is_err());
     }
 
     #[test]

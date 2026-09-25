@@ -1,6 +1,7 @@
 #![allow(unused_imports)]
 use crate::{config::*, mcp::*, memory::*, providers::*, sessions::*};
 pub(crate) const SUMMARY_MAX_CHARS: usize = 4000;
+pub(crate) const MAX_MCP_CALLS_PER_REQUEST: usize = MAX_PIPELINE_STEPS;
 use anyhow::{anyhow, bail, Context, Result};
 use console::{style, Key, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect, Input, Select};
@@ -23,6 +24,35 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 pub(crate) type RequestFuture<'a> = Pin<Box<dyn Future<Output = Result<ApiAnswer>> + Send + 'a>>;
+
+struct AgentPipelinePolicy<'a> {
+    agent: &'a mut Agent,
+    input: &'a str,
+}
+
+impl PipelineExecutionPolicy for AgentPipelinePolicy<'_> {
+    fn authorize<'a>(
+        &'a mut self,
+        definition: &'a ToolDefinition,
+        call: &'a ToolCall,
+    ) -> AuthorizationFuture<'a> {
+        Box::pin(async move {
+            if !self.agent.invariants.is_empty() {
+                let verdict = self.agent.verify_tool_call(self.input, call).await?;
+                if verdict.verdict != VerificationVerdict::Allow {
+                    let message = if verdict.verdict == VerificationVerdict::Violation {
+                        invariant_refusal(&self.agent.invariants, &verdict.invariant_ids)
+                            .unwrap_or(verdict.reason)
+                    } else {
+                        verdict.reason
+                    };
+                    bail!(message);
+                }
+            }
+            Ok(definition.read_only || self.agent.tool_approval.approve(definition, call)?)
+        })
+    }
+}
 
 pub(crate) trait RequestClient: Send + Sync {
     fn send<'a>(
@@ -90,10 +120,22 @@ fn pipeline_result(
         plan.steps
             .iter()
             .skip(skipped_from)
-            .map(|step| PipelineStepTrace {
+            .enumerate()
+            .map(|(offset, step)| PipelineStepTrace {
+                ordinal: skipped_from + offset + 1,
                 id: step.id.clone(),
                 tool: step.tool.clone(),
+                server_id: step
+                    .tool
+                    .split_once("__")
+                    .map(|(server, _)| server.to_owned()),
+                native_tool: step
+                    .tool
+                    .split_once("__")
+                    .map_or_else(|| step.tool.clone(), |(_, tool)| tool.to_owned()),
                 status: PipelineStepStatus::Skipped,
+                outcome: ToolOutcome::Failed,
+                duration_ms: 0,
                 arguments: step.arguments.clone(),
                 output: None,
                 error: None,
@@ -111,6 +153,11 @@ fn pipeline_result(
         content: serde_json::to_value(trace)
             .unwrap_or_else(|error| json!({"status": "failed", "error": error.to_string()})),
         is_error: status != PipelineStatus::Succeeded,
+        outcome: if status == PipelineStatus::Succeeded {
+            ToolOutcome::Success
+        } else {
+            ToolOutcome::Failed
+        },
     }
 }
 
@@ -410,8 +457,10 @@ impl Agent {
         self.session_output_tokens += answer.output_tokens;
         let mut tool_calls_count = 0;
         while !answer.tool_calls.is_empty() {
-            if tool_calls_count + answer.tool_calls.len() > 3 {
-                bail!("достигнут лимит MCP-вызовов для одного запроса (3)");
+            if tool_calls_count + answer.tool_calls.len() > MAX_MCP_CALLS_PER_REQUEST {
+                bail!(
+                    "достигнут лимит MCP-вызовов для одного запроса ({MAX_MCP_CALLS_PER_REQUEST})"
+                );
             }
             let mut results = Vec::with_capacity(answer.tool_calls.len());
             for call in &answer.tool_calls {
@@ -422,7 +471,7 @@ impl Agent {
                         .clone()
                         .ok_or_else(|| anyhow!("MCP-пайплайн недоступен"))?;
                     let result = self
-                        .execute_pipeline_call(
+                        .execute_pipeline_call_shared(
                             input,
                             call,
                             &tool_definitions,
@@ -463,6 +512,7 @@ impl Agent {
                         call_id: call.id.clone(),
                         content: json!({"cancelled": true, "reason": "cancelled_by_user"}),
                         is_error: true,
+                        outcome: ToolOutcome::Failed,
                     });
                     continue;
                 }
@@ -473,6 +523,7 @@ impl Agent {
                         call_id: call.id.clone(),
                         content: json!({"error": error.to_string()}),
                         is_error: true,
+                        outcome: ToolOutcome::Failed,
                     });
                 if !result.is_error && !definition.read_only {
                     external_action_completed = true;
@@ -556,6 +607,54 @@ impl Agent {
         Ok(answer)
     }
 
+    async fn execute_pipeline_call_shared(
+        &mut self,
+        input: &str,
+        call: &ToolCall,
+        definitions: &[ToolDefinition],
+        executor: SharedToolExecutor,
+        external_action_completed: &mut bool,
+    ) -> ToolResult {
+        let plan = match parse_plan(&call.arguments) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return ToolResult {
+                    call_id: call.id.clone(),
+                    content: json!({"status": "failed", "error": error.to_string()}),
+                    is_error: true,
+                    outcome: ToolOutcome::Failed,
+                };
+            }
+        };
+        let timeout = self.tool_timeout;
+        let mut policy = AgentPipelinePolicy { agent: self, input };
+        let result = execute_pipeline(
+            &call.id,
+            &plan,
+            definitions,
+            executor,
+            &Value::Null,
+            &mut policy,
+            timeout,
+        )
+        .await;
+        if result
+            .content
+            .get("steps")
+            .and_then(Value::as_array)
+            .is_some_and(|steps| {
+                steps.iter().any(|step| {
+                    step.get("state_changed").and_then(Value::as_bool) == Some(true)
+                        && step.get("status").and_then(Value::as_str) == Some("succeeded")
+                })
+            })
+        {
+            *external_action_completed = true;
+        }
+        result
+    }
+
+    #[allow(dead_code)]
     async fn execute_pipeline_call(
         &mut self,
         input: &str,
@@ -571,6 +670,7 @@ impl Agent {
                     call_id: call.id.clone(),
                     content: json!({"status": "failed", "error": error.to_string()}),
                     is_error: true,
+                    outcome: ToolOutcome::Failed,
                 };
             }
         };
@@ -608,9 +708,20 @@ impl Agent {
                 Ok(arguments) => arguments,
                 Err(error) => {
                     traces.push(PipelineStepTrace {
+                        ordinal: index + 1,
                         id: step.id.clone(),
                         tool: step.tool.clone(),
+                        server_id: step
+                            .tool
+                            .split_once("__")
+                            .map(|(server, _)| server.to_owned()),
+                        native_tool: step
+                            .tool
+                            .split_once("__")
+                            .map_or_else(|| step.tool.clone(), |(_, tool)| tool.to_owned()),
                         status: PipelineStepStatus::Failed,
+                        outcome: ToolOutcome::Failed,
+                        duration_ms: 0,
                         arguments: step.arguments.clone(),
                         output: None,
                         error: Some(error.to_string()),
@@ -628,9 +739,20 @@ impl Agent {
             };
             if let Err(error) = validate_tool_arguments(definition, &arguments) {
                 traces.push(PipelineStepTrace {
+                    ordinal: index + 1,
                     id: step.id.clone(),
                     tool: step.tool.clone(),
+                    server_id: step
+                        .tool
+                        .split_once("__")
+                        .map(|(server, _)| server.to_owned()),
+                    native_tool: step
+                        .tool
+                        .split_once("__")
+                        .map_or_else(|| step.tool.clone(), |(_, tool)| tool.to_owned()),
                     status: PipelineStepStatus::Failed,
+                    outcome: ToolOutcome::Failed,
+                    duration_ms: 0,
                     arguments,
                     output: None,
                     error: Some(error.to_string()),
@@ -656,9 +778,20 @@ impl Agent {
                     Ok(verdict) => verdict,
                     Err(error) => {
                         traces.push(PipelineStepTrace {
+                            ordinal: index + 1,
                             id: step.id.clone(),
                             tool: step.tool.clone(),
+                            server_id: step
+                                .tool
+                                .split_once("__")
+                                .map(|(server, _)| server.to_owned()),
+                            native_tool: step
+                                .tool
+                                .split_once("__")
+                                .map_or_else(|| step.tool.clone(), |(_, tool)| tool.to_owned()),
                             status: PipelineStepStatus::Failed,
+                            outcome: ToolOutcome::Failed,
+                            duration_ms: 0,
                             arguments,
                             output: None,
                             error: Some(error.to_string()),
@@ -682,9 +815,20 @@ impl Agent {
                         verdict.reason
                     };
                     traces.push(PipelineStepTrace {
+                        ordinal: index + 1,
                         id: step.id.clone(),
                         tool: step.tool.clone(),
+                        server_id: step
+                            .tool
+                            .split_once("__")
+                            .map(|(server, _)| server.to_owned()),
+                        native_tool: step
+                            .tool
+                            .split_once("__")
+                            .map_or_else(|| step.tool.clone(), |(_, tool)| tool.to_owned()),
                         status: PipelineStepStatus::Failed,
+                        outcome: ToolOutcome::Failed,
+                        duration_ms: 0,
                         arguments,
                         output: None,
                         error: Some(message.clone()),
@@ -708,9 +852,20 @@ impl Agent {
                     .unwrap_or(false);
             if !approved {
                 traces.push(PipelineStepTrace {
+                    ordinal: index + 1,
                     id: step.id.clone(),
                     tool: step.tool.clone(),
+                    server_id: step
+                        .tool
+                        .split_once("__")
+                        .map(|(server, _)| server.to_owned()),
+                    native_tool: step
+                        .tool
+                        .split_once("__")
+                        .map_or_else(|| step.tool.clone(), |(_, tool)| tool.to_owned()),
                     status: PipelineStepStatus::Cancelled,
+                    outcome: ToolOutcome::Failed,
+                    duration_ms: 0,
                     arguments,
                     output: None,
                     error: Some("действие отменено пользователем".into()),
@@ -727,6 +882,7 @@ impl Agent {
             }
 
             let step_timeout = mcp_tool_timeout(&step_call.name, self.tool_timeout);
+            let step_started = Instant::now();
             let result =
                 match tokio::time::timeout(step_timeout, executor.execute(&step_call)).await {
                     Ok(Ok(result)) => result,
@@ -734,6 +890,7 @@ impl Agent {
                         call_id: step_call.id.clone(),
                         content: json!({"error": error.to_string()}),
                         is_error: true,
+                        outcome: ToolOutcome::Failed,
                     },
                     Err(_) => ToolResult {
                         call_id: step_call.id.clone(),
@@ -744,13 +901,25 @@ impl Agent {
                             )
                         }),
                         is_error: true,
+                        outcome: ToolOutcome::Failed,
                     },
                 };
             if result.is_error {
                 traces.push(PipelineStepTrace {
+                    ordinal: index + 1,
                     id: step.id.clone(),
                     tool: step.tool.clone(),
+                    server_id: step
+                        .tool
+                        .split_once("__")
+                        .map(|(server, _)| server.to_owned()),
+                    native_tool: step
+                        .tool
+                        .split_once("__")
+                        .map_or_else(|| step.tool.clone(), |(_, tool)| tool.to_owned()),
                     status: PipelineStepStatus::Failed,
+                    outcome: result.outcome,
+                    duration_ms: step_started.elapsed().as_millis(),
                     arguments,
                     output: Some(result.content),
                     error: Some("MCP-инструмент вернул ошибку".into()),
@@ -771,9 +940,20 @@ impl Agent {
             }
             outputs.insert(step.id.clone(), result.content.clone());
             traces.push(PipelineStepTrace {
+                ordinal: index + 1,
                 id: step.id.clone(),
                 tool: step.tool.clone(),
+                server_id: step
+                    .tool
+                    .split_once("__")
+                    .map(|(server, _)| server.to_owned()),
+                native_tool: step
+                    .tool
+                    .split_once("__")
+                    .map_or_else(|| step.tool.clone(), |(_, tool)| tool.to_owned()),
                 status: PipelineStepStatus::Succeeded,
+                outcome: result.outcome,
+                duration_ms: step_started.elapsed().as_millis(),
                 arguments,
                 output: Some(result.content),
                 error: None,

@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{
@@ -15,7 +16,9 @@ pub(crate) const DEFAULT_MCP_TOOL_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const GITHUB_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(crate) fn mcp_tool_timeout(tool_name: &str, default: Duration) -> Duration {
-    if tool_name == "github_project_activity" {
+    if matches!(tool_name, "github_project_activity" | "project_activity")
+        || tool_name.ends_with("__project_activity")
+    {
         default.max(GITHUB_ACTIVITY_TIMEOUT)
     } else {
         default
@@ -39,26 +42,44 @@ pub(crate) struct ToolCall {
     pub(crate) arguments: Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ToolOutcome {
+    Success,
+    Failed,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ToolResult {
     pub(crate) call_id: String,
     pub(crate) content: Value,
     pub(crate) is_error: bool,
+    pub(crate) outcome: ToolOutcome,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ToolRoute {
+    pub(crate) server_id: String,
+    pub(crate) native_name: String,
+    pub(crate) definition: ToolDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PipelinePlan {
     pub(crate) name: String,
     pub(crate) steps: Vec<PipelineStep>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PipelineStep {
     pub(crate) id: String,
     pub(crate) tool: String,
     pub(crate) arguments: Value,
+    #[serde(default)]
+    pub(crate) capture_output: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +87,7 @@ pub(crate) struct PipelineStep {
 pub(crate) enum PipelineStatus {
     Succeeded,
     Failed,
+    Unknown,
     Cancelled,
 }
 
@@ -74,15 +96,21 @@ pub(crate) enum PipelineStatus {
 pub(crate) enum PipelineStepStatus {
     Succeeded,
     Failed,
+    Unknown,
     Cancelled,
     Skipped,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PipelineStepTrace {
+    pub(crate) ordinal: usize,
     pub(crate) id: String,
     pub(crate) tool: String,
+    pub(crate) server_id: Option<String>,
+    pub(crate) native_tool: String,
     pub(crate) status: PipelineStepStatus,
+    pub(crate) outcome: ToolOutcome,
+    pub(crate) duration_ms: u128,
     pub(crate) arguments: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) output: Option<Value>,
@@ -124,7 +152,8 @@ pub(crate) fn pipeline_tool_definition() -> ToolDefinition {
                         "properties": {
                             "id": {"type": "string", "minLength": 1},
                             "tool": {"type": "string", "minLength": 1},
-                            "arguments": {"type": "object"}
+                            "arguments": {"type": "object"},
+                            "capture_output": {"type": "boolean", "default": false}
                         }
                     }
                 }
@@ -194,10 +223,16 @@ fn validate_references(value: &Value, previous: &BTreeSet<&str>, step_id: &str) 
                 let reference = reference
                     .as_str()
                     .ok_or_else(|| anyhow!("$ref шага «{step_id}» должен быть строкой"))?;
-                let source = reference.strip_suffix(".output").ok_or_else(|| {
-                    anyhow!("$ref шага «{step_id}» должен иметь вид <step-id>.output")
+                if matches!(reference, "run.id" | "run.trigger" | "run.scheduled_at") {
+                    return Ok(());
+                }
+                let (source, path) = reference.split_once(".output").ok_or_else(|| {
+                    anyhow!("$ref шага «{step_id}» должен иметь вид <step-id>.output[.field] или run.<field>")
                 })?;
-                if !previous.contains(source) {
+                if !path.is_empty() && !path.starts_with('.') {
+                    bail!("$ref шага «{step_id}» содержит некорректный путь: {reference}");
+                }
+                if source.is_empty() || !previous.contains(source) {
                     bail!("$ref шага «{step_id}» указывает не на предыдущий шаг: {reference}");
                 }
             } else {
@@ -215,10 +250,18 @@ pub(crate) fn resolve_pipeline_arguments(
     arguments: &Value,
     outputs: &BTreeMap<String, Value>,
 ) -> Result<Value> {
+    resolve_pipeline_arguments_with_runtime(arguments, outputs, &Value::Null)
+}
+
+pub(crate) fn resolve_pipeline_arguments_with_runtime(
+    arguments: &Value,
+    outputs: &BTreeMap<String, Value>,
+    runtime: &Value,
+) -> Result<Value> {
     match arguments {
         Value::Array(items) => items
             .iter()
-            .map(|item| resolve_pipeline_arguments(item, outputs))
+            .map(|item| resolve_pipeline_arguments_with_runtime(item, outputs, runtime))
             .collect::<Result<Vec<_>>>()
             .map(Value::Array),
         Value::Object(object) => {
@@ -229,18 +272,29 @@ pub(crate) fn resolve_pipeline_arguments(
                 let reference = reference
                     .as_str()
                     .ok_or_else(|| anyhow!("$ref должен быть строкой"))?;
-                let source = reference
-                    .strip_suffix(".output")
-                    .ok_or_else(|| anyhow!("$ref должен иметь вид <step-id>.output"))?;
-                outputs
+                if let Some(path) = reference.strip_prefix("run.") {
+                    return select_reference(
+                        runtime
+                            .get("run")
+                            .ok_or_else(|| anyhow!("runtime run недоступен"))?,
+                        path,
+                    );
+                }
+                let (source, path) = reference.split_once(".output").ok_or_else(|| {
+                    anyhow!("$ref должен иметь вид <step-id>.output[.field] или run.<field>")
+                })?;
+                let output = outputs
                     .get(source)
-                    .cloned()
-                    .ok_or_else(|| anyhow!("результат шага «{source}» недоступен"))
+                    .ok_or_else(|| anyhow!("результат шага «{source}» недоступен"))?;
+                select_reference(output, path.trim_start_matches('.'))
             } else {
                 object
                     .iter()
                     .map(|(key, value)| {
-                        Ok((key.clone(), resolve_pipeline_arguments(value, outputs)?))
+                        Ok((
+                            key.clone(),
+                            resolve_pipeline_arguments_with_runtime(value, outputs, runtime)?,
+                        ))
                     })
                     .collect::<Result<Map<String, Value>>>()
                     .map(Value::Object)
@@ -248,6 +302,18 @@ pub(crate) fn resolve_pipeline_arguments(
         }
         _ => Ok(arguments.clone()),
     }
+}
+
+fn select_reference(value: &Value, path: &str) -> Result<Value> {
+    let mut selected = value;
+    if !path.is_empty() {
+        for segment in path.split('.') {
+            selected = selected
+                .get(segment)
+                .ok_or_else(|| anyhow!("поле ссылки «{segment}» недоступно"))?;
+        }
+    }
+    Ok(selected.clone())
 }
 
 pub(crate) fn validate_tool_arguments(

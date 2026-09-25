@@ -25,6 +25,14 @@ use std::{
 
 struct InteractiveToolApproval;
 
+fn parse_confirmation(value: &str) -> Option<bool> {
+    match value.trim().to_lowercase().as_str() {
+        "да" | "д" | "yes" | "y" => Some(true),
+        "нет" | "н" | "no" | "n" => Some(false),
+        _ => None,
+    }
+}
+
 impl ToolApproval for InteractiveToolApproval {
     fn approve(&self, definition: &ToolDefinition, call: &ToolCall) -> Result<bool> {
         println!(
@@ -32,7 +40,10 @@ impl ToolApproval for InteractiveToolApproval {
             style("Предложен MCP-вызов:").yellow().bold(),
             style(&definition.name).cyan().bold()
         );
-        if call.name == "create_calendar_event" {
+        if matches!(
+            call.name.as_str(),
+            "create_calendar_event" | "calendar__create_event"
+        ) {
             let title = call
                 .arguments
                 .get("title")
@@ -63,30 +74,57 @@ impl ToolApproval for InteractiveToolApproval {
                 serde_json::to_string_pretty(&call.arguments).unwrap_or_else(|_| "{}".into())
             );
         }
-        Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("Выполнить действие?")
-            .default(false)
-            .interact()
-            .context("не удалось получить подтверждение MCP-вызова")
+        loop {
+            let answer: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Выполнить действие? Введите да или нет")
+                .default("нет".into())
+                .interact_text()
+                .context("не удалось получить подтверждение MCP-вызова")?;
+            if let Some(approved) = parse_confirmation(&answer) {
+                return Ok(approved);
+            }
+            println!("{}", style("Введите «да» или «нет».").yellow());
+        }
+    }
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::parse_confirmation;
+
+    #[test]
+    fn mcp_confirmation_accepts_russian_and_english_answers() {
+        for answer in ["да", "Д", "yes", "Y"] {
+            assert_eq!(parse_confirmation(answer), Some(true));
+        }
+        for answer in ["нет", "Н", "no", "N"] {
+            assert_eq!(parse_confirmation(answer), Some(false));
+        }
+        assert_eq!(parse_confirmation(""), None);
+        assert_eq!(parse_confirmation("возможно"), None);
     }
 }
 
 async fn build_mcp_runtime(config: &Config) -> Result<Option<SharedToolExecutor>> {
-    let Some(url) = config.mcp.server_url.as_deref() else {
-        return Ok(None);
-    };
-    if config.mcp.enabled_tools.is_empty() {
+    if config.mcp.servers.is_empty() {
         return Ok(None);
     }
-    let runtime = McpRuntime::connect(url, &config.mcp.enabled_tools).await?;
-    Ok(Some(Arc::new(runtime)))
+    let router = McpRouter::connect(&config.mcp.servers).await;
+    for warning in router.warnings() {
+        eprintln!("{} {warning}", style("MCP-сервер недоступен:").yellow());
+    }
+    if router.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(Arc::new(router)))
+    }
 }
 pub(crate) async fn run() -> Result<()> {
     let startup_mode = parse_startup_mode(std::env::args().skip(1))?;
-    if startup_mode == StartupMode::McpServer {
+    if let StartupMode::McpServer { kind, addr } = startup_mode {
         let env_path = std::env::current_dir()?.join(".env-mcp");
         crate::mcp::load_mcp_env_file(&env_path)?;
-        return run_mcp_server().await;
+        return run_mcp_server(kind, addr).await;
     }
     let StartupMode::Interactive { dump_metrics } = startup_mode else {
         unreachable!();

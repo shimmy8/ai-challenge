@@ -1,10 +1,26 @@
-# mcp-tool-management Specification
+## REMOVED Requirements
 
-## Purpose
+### Requirement: MCP configuration is backward-compatible
+**Reason**: Учебный проект переходит на новый реестр серверов без поддержки одиночного legacy-формата.
+**Migration**: Пользователь заново регистрирует нужные MCP-серверы через `/mcp`.
 
-Позволяет пользователю `fox-llm` подключить один MCP-сервер, увидеть объявленные им инструменты и явно выбрать инструменты, разрешённые для будущего использования агентом.
+### Requirement: MCP menu reports connection state
+**Reason**: Меню единственного сервера заменяется обзором и управлением несколькими серверами.
+**Migration**: Состояние каждого endpoint показывается в общем списке `/mcp`.
 
-## Requirements
+### Requirement: New server address is validated before persistence
+**Reason**: Операция смены единственного сервера заменяется независимым добавлением и редактированием записей реестра.
+**Migration**: Каждый новый endpoint проходит handshake и `tools/list` перед сохранением.
+
+### Requirement: User can inspect and select server tools
+**Reason**: Allowlist с ручным включением заменяется автоматическим включением и явным denylist.
+**Migration**: После регистрации доступны все инструменты, кроме отключённых пользователем.
+
+### Requirement: Local demonstration server is independently runnable
+**Reason**: Монолитный demo-сервер и инструмент `echo` удаляются в пользу предметных серверов.
+**Migration**: Для проверки запускаются именованные локальные серверы `github`, `reporting`, `workspace`, `calendar`, `ai`, `telegram` и `orchestrator`.
+
+## ADDED Requirements
 
 ### Requirement: MCP configuration stores named servers
 Система SHALL хранить список MCP-серверов, каждый с уникальным стабильным `id`, HTTP(S)-адресом и списком отключённых нативных инструментов. Server ID MUST состоять из безопасных для имени инструмента строчных ASCII-букв, цифр и подчёркиваний и MUST NOT содержать разделитель `__`.
