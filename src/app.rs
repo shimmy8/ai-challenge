@@ -1,6 +1,7 @@
 #![allow(unused_imports)]
 use crate::{
-    agent::*, cli::*, config::*, mcp::*, memory::*, metrics::*, model::*, providers::*, sessions::*,
+    agent::*, cli::*, config::*, mcp::*, memory::*, metrics::*, model::*, providers::*, rag::*,
+    sessions::*,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use console::{style, Key, Term};
@@ -125,6 +126,9 @@ pub(crate) async fn run() -> Result<()> {
         let env_path = std::env::current_dir()?.join(".env-mcp");
         crate::mcp::load_mcp_env_file(&env_path)?;
         return run_mcp_server(kind, addr).await;
+    }
+    if let StartupMode::Index(options) = startup_mode {
+        return run_indexing(options).await;
     }
     let StartupMode::Interactive { dump_metrics } = startup_mode else {
         unreachable!();

@@ -1,6 +1,7 @@
 /target/
 .fox-llm.json
 *.fox-llm.json
+.fox-embeddings.json
 .fox-sessions.db
 .fox-sessions.db-shm
 .fox-sessions.db-wal
@@ -10,6 +11,9 @@
 .fox-scheduler-test-*.db
 .fox-scheduler-test-*.db-shm
 .fox-scheduler-test-*.db-wal
+.fox-index.db
+.fox-index.db-shm
+.fox-index.db-wal
 fox-metrics.log
 mcp.log
 .env

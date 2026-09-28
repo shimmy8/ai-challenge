@@ -1232,6 +1232,52 @@ mod suite {
             "127.0.0.1:8001".into()
         ])
         .is_err());
+        assert_eq!(
+            parse_startup_mode(vec!["index".into()]).unwrap(),
+            StartupMode::Index(IndexOptions::default())
+        );
+        assert_eq!(
+            parse_startup_mode(vec![
+                "index".into(),
+                "--source".into(),
+                "reports".into(),
+                "--source".into(),
+                "openspec/specs".into(),
+                "--strategy".into(),
+                "fixed".into(),
+                "--index-path".into(),
+                "custom.db".into(),
+                "--chunk-size".into(),
+                "800".into(),
+                "--chunk-overlap".into(),
+                "100".into(),
+                "--comparison-output".into(),
+                "comparison.json".into(),
+            ])
+            .unwrap(),
+            StartupMode::Index(IndexOptions {
+                sources: vec!["reports".into(), "openspec/specs".into()],
+                strategy: IndexStrategy::Fixed,
+                index_path: "custom.db".into(),
+                chunk_size: 800,
+                chunk_overlap: 100,
+                comparison_output: Some("comparison.json".into()),
+            })
+        );
+        assert!(parse_startup_mode(vec![
+            "index".into(),
+            "--embedding-config".into(),
+            "other.json".into(),
+        ])
+        .is_err());
+        assert!(parse_startup_mode(vec![
+            "index".into(),
+            "--chunk-size".into(),
+            "10".into(),
+            "--chunk-overlap".into(),
+            "10".into(),
+        ])
+        .is_err());
     }
 
     #[test]

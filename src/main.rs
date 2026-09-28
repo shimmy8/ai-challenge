@@ -8,6 +8,7 @@ mod memory;
 mod metrics;
 mod model;
 mod providers;
+mod rag;
 mod sessions;
 mod tests;
 
@@ -19,6 +20,7 @@ pub(crate) use memory::*;
 pub(crate) use metrics::*;
 pub(crate) use model::*;
 pub(crate) use providers::*;
+pub(crate) use rag::*;
 pub(crate) use sessions::*;
 
 #[tokio::main]

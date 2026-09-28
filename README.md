@@ -35,6 +35,40 @@ cargo run -- --dump-metrics
 `.fox-llm.json` в текущей директории. Файл исключён из Git и на Unix получает
 права `0600`.
 
+## Индексация документов для RAG
+
+Неинтерактивная команда `index` строит локальный SQLite-индекс Markdown-файлов.
+По умолчанию она обрабатывает `reports/` и `openspec/specs/` двумя стратегиями:
+`fixed` с overlap и `structural` по иерархии Markdown-заголовков.
+
+Embedding provider настраивается отдельно от агента. Скопируйте безопасный
+пример, укажите OpenAI-compatible endpoint и credentials и сохраните файл только
+локально:
+
+```bash
+cp fox-embeddings.example.json .fox-embeddings.json
+chmod 600 .fox-embeddings.json
+```
+
+Запуск с индексом `.fox-index.db` и JSON-сравнением стратегий:
+
+```bash
+cargo run -- index \
+  --comparison-output reports/day21/chunking-comparison.json
+```
+
+Доступны повторяемый `--source`, `--strategy fixed|structural|all`,
+`--index-path`, `--chunk-size`, `--chunk-overlap` и `--comparison-output`.
+Неизменившиеся embeddings переиспользуются по хешу текста, модели и размерности.
+Команда построчно показывает безопасный progress в `stderr`, включая cache hits,
+embedding batches и публикацию SQLite; сетевой запрос ограничен 60 секундами.
+
+`.fox-embeddings.json` и `.fox-index.db*` исключены из Git. Progress, итоговый
+JSON и сообщения об ошибках не содержат API key, тексты чанков или vectors.
+Подробности реализации и фактическое сравнение находятся в
+[`reports/day21/README.md`](reports/day21/README.md), а поведенческий контракт —
+в [`openspec/specs/document-indexing/spec.md`](openspec/specs/document-indexing/spec.md).
+
 ## MCP
 
 MCP разбит на независимые loopback-серверы. Каждый процесс запускается с явным
