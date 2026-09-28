@@ -1,0 +1,8 @@
+{
+  "provider": "openai-compatible",
+  "endpoint": "https://api.openai.com/v1/embeddings",
+  "model": "text-embedding-3-small",
+  "dimensions": 1536,
+  "batch_size": 64,
+  "api_key": "replace-with-your-key"
+}
