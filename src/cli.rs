@@ -161,6 +161,7 @@ pub(crate) struct StatusBar<'a> {
     pub(crate) temperature: f64,
     pub(crate) strategy: CompressionStrategy,
     pub(crate) context_messages: usize,
+    pub(crate) rag_enabled: bool,
     pub(crate) active_branch: Option<&'a str>,
     pub(crate) memory: &'a ActiveMemory,
 }
@@ -186,7 +187,7 @@ pub(crate) fn show_status_bar(status_bar: StatusBar<'_>) -> Result<()> {
         .as_ref()
         .map(|value| value.title.as_str());
     let status = format!(
-        "{} {}  {} {}  {} {}  {} {}  {} {}{}{}",
+        "{} {}  {} {}  {} {}  {} {}  {} {}  {} {}{}{}",
         style("Сжатие:").dim(),
         style(compression).cyan().bold(),
         style("Провайдер:").dim(),
@@ -197,6 +198,10 @@ pub(crate) fn show_status_bar(status_bar: StatusBar<'_>) -> Result<()> {
         style(status_bar.mode).cyan().bold(),
         style("Температура:").dim(),
         style(format_temperature(status_bar.temperature))
+            .cyan()
+            .bold(),
+        style("RAG:").dim(),
+        style(if status_bar.rag_enabled { "on" } else { "off" })
             .cyan()
             .bold(),
         profile

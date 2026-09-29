@@ -1,0 +1,698 @@
+{
+  "generated_at_unix_ms": 1790700337519,
+  "provider": "OpenAI",
+  "model": "gpt-5.6-sol",
+  "questions": [
+    {
+      "id": "chunking-defaults",
+      "question": "Каковы значения chunk_size и chunk_overlap по умолчанию при fixed chunking?",
+      "expectation": "Ответ должен назвать размер чанка 1200 Unicode-символов и overlap 200 символов.",
+      "required_fact_fragments": [
+        "1200",
+        "200"
+      ],
+      "expected_sources": [
+        "openspec/specs/document-indexing/spec.md"
+      ],
+      "plain": {
+        "answer": "Уточните, о каком продукте или библиотеке идёт речь? Параметры `chunk_size` и `chunk_overlap` при fixed chunking имеют разные значения по умолчанию в разных системах.",
+        "fact_coverage": 0.0,
+        "source_recall": 0.0,
+        "input_tokens": 95,
+        "output_tokens": 48,
+        "duration_ms": 6297,
+        "sources": []
+      },
+      "rag": {
+        "answer": "В предоставленном контексте значения по умолчанию для `chunk_size` и `chunk_overlap` не указаны. Известно лишь, что стратегия `fixed` делит текст по числу Unicode-символов и сохраняет перекрытие между чанками [2]. Поэтому определить точные значения по этим данным нельзя.",
+        "fact_coverage": 0.0,
+        "source_recall": 0.0,
+        "input_tokens": 924,
+        "output_tokens": 73,
+        "duration_ms": 11450,
+        "sources": [
+          {
+            "rank": 1,
+            "source": "reports/day21/README.md",
+            "title": "День 21. Индексация документов для RAG",
+            "section": "День 21. Индексация документов для RAG > Фактическое сравнение",
+            "similarity": 0.45050412
+          },
+          {
+            "rank": 2,
+            "source": "reports/day21/README.md",
+            "title": "День 21. Индексация документов для RAG",
+            "section": "День 21. Индексация документов для RAG > Стратегии",
+            "similarity": 0.35958514
+          },
+          {
+            "rank": 3,
+            "source": "reports/day13/report.md",
+            "title": "День 13. Состояние задачи",
+            "section": "День 13. Состояние задачи > Формат хранения > Сравнение размера",
+            "similarity": 0.2909413
+          },
+          {
+            "rank": 4,
+            "source": "reports/day4/report.md",
+            "title": "Анализ влияния temperature",
+            "section": "Анализ влияния temperature > Для каких задач подходит каждая настройка",
+            "similarity": 0.28141844
+          },
+          {
+            "rank": 5,
+            "source": "reports/day4/report.md",
+            "title": "Анализ влияния temperature",
+            "section": "Анализ влияния temperature > Для каких задач подходит каждая настройка > Temperature = 1.2",
+            "similarity": 0.27573964
+          }
+        ]
+      }
+    },
+    {
+      "id": "day21-strategy-comparison",
+      "question": "Сколько чанков создали fixed и structural в фактическом эксперименте Дня 21 и какая стратегия рекомендована для retrieval?",
+      "expectation": "Ответ должен указать 292 fixed-чанка, 662 structural-чанка и рекомендацию structural для retrieval.",
+      "required_fact_fragments": [
+        "292",
+        "662",
+        "structural"
+      ],
+      "expected_sources": [
+        "reports/day21/README.md"
+      ],
+      "plain": {
+        "answer": "У меня нет контекста или материалов по «фактическому эксперименту Дня 21». Пришлите отчёт, ссылку или фрагмент с результатами — тогда я точно скажу:\n\n- сколько чанков создали **fixed** и **structural**;\n- какую стратегию рекомендовали для **retrieval**.",
+        "fact_coverage": 0.3333333333333333,
+        "source_recall": 0.0,
+        "input_tokens": 105,
+        "output_tokens": 75,
+        "duration_ms": 3879,
+        "sources": []
+      },
+      "rag": {
+        "answer": "Данных недостаточно, чтобы назвать фактическое число чанков для `fixed` и `structural`: в отчёте указано, что эксперимент агентом не запускался, а значения должны появиться после ручного запуска в `chunking-comparison.json` [4].\n\nТакже в предоставленных фрагментах нет итоговой рекомендации для retrieval. Известно лишь, что `structural` сохраняет иерархию Markdown-разделов, а `fixed` делит текст по размеру с overlap [2]. Поэтому достоверно выбрать рекомендованную стратегию по этим данным нельзя.",
+        "fact_coverage": 0.3333333333333333,
+        "source_recall": 1.0,
+        "input_tokens": 1263,
+        "output_tokens": 128,
+        "duration_ms": 4468,
+        "sources": [
+          {
+            "rank": 1,
+            "source": "reports/day10/report.md",
+            "title": "День 10 — Sliding Window, Sticky Facts и Branching",
+            "section": "День 10 — Sliding Window, Sticky Facts и Branching > Общие выводы > 2. Стабильность",
+            "similarity": 0.4646714
+          },
+          {
+            "rank": 2,
+            "source": "reports/day21/README.md",
+            "title": "День 21. Индексация документов для RAG",
+            "section": "День 21. Индексация документов для RAG > Стратегии",
+            "similarity": 0.43154928
+          },
+          {
+            "rank": 3,
+            "source": "reports/day10/report.md",
+            "title": "День 10 — Sliding Window, Sticky Facts и Branching",
+            "section": "День 10 — Sliding Window, Sticky Facts и Branching > Сессия 21 — Branching > Ограничения анализа",
+            "similarity": 0.4145809
+          },
+          {
+            "rank": 4,
+            "source": "reports/day21/README.md",
+            "title": "День 21. Индексация документов для RAG",
+            "section": "День 21. Индексация документов для RAG > Фактическое сравнение",
+            "similarity": 0.4120239
+          },
+          {
+            "rank": 5,
+            "source": "reports/day10/report.md",
+            "title": "День 10 — Sliding Window, Sticky Facts и Branching",
+            "section": "День 10 — Sliding Window, Sticky Facts и Branching > Сессия 21 — Branching > Итог",
+            "similarity": 0.39646778
+          }
+        ]
+      }
+    },
+    {
+      "id": "memory-layers",
+      "question": "Какие три слоя памяти определены у агента и что представляет каждый из них?",
+      "expectation": "Нужно перечислить краткосрочную историю сессии, рабочее состояние задачи и долговременный выбранный профиль, отметив их раздельное хранение.",
+      "required_fact_fragments": [
+        "краткосроч",
+        "рабоч",
+        "долговрем"
+      ],
+      "expected_sources": [
+        "openspec/specs/agent-memory/spec.md"
+      ],
+      "plain": {
+        "answer": "Обычно у агента выделяют три слоя памяти:\n\n1. **Кратковременная (рабочая) память** — текущий контекст взаимодействия: последние сообщения, промежуточные рассуждения, активные цели и результаты вызовов инструментов. Ограничена контекстным окном и действует в рамках текущей сессии.\n\n2. **Эпизодическая память** — история конкретных событий и взаимодействий: что произошло, когда, с кем и к какому результату привело. Позволяет агенту учитывать прошлый опыт и вспоминать похожие ситуации.\n\n3. **Семантическая память** — устойчивые обобщённые знания: факты, понятия, правила, сведения о пользователе и предметной области. В отличие от эпизодической памяти, хранит не отдельные события, а извлечённые из них знания.",
+        "fact_coverage": 0.3333333333333333,
+        "source_recall": 0.0,
+        "input_tokens": 95,
+        "output_tokens": 192,
+        "duration_ms": 3728,
+        "sources": []
+      },
+      "rag": {
+        "answer": "У агента определены три раздельных слоя памяти:\n\n1. **Краткосрочная память** — история текущей сессии.\n2. **Рабочая память** — состояние активной задачи, включая её название, текущую фазу и структурированный список TODO [5].\n3. **Долговременная память** — выбранный профиль пользователя [2].\n\nСлои хранятся отдельно, и данные между ними автоматически не переносятся [2].",
+        "fact_coverage": 1.0,
+        "source_recall": 1.0,
+        "input_tokens": 616,
+        "output_tokens": 103,
+        "duration_ms": 3522,
+        "sources": [
+          {
+            "rank": 1,
+            "source": "openspec/specs/agent-memory/spec.md",
+            "title": "Agent Memory Specification",
+            "section": "Agent Memory Specification > Purpose",
+            "similarity": 0.5807218
+          },
+          {
+            "rank": 2,
+            "source": "openspec/specs/agent-memory/spec.md",
+            "title": "Agent Memory Specification",
+            "section": "Agent Memory Specification > Requirements > Requirement: Память разделена на три слоя",
+            "similarity": 0.5465306
+          },
+          {
+            "rank": 3,
+            "source": "openspec/specs/agent-memory/spec.md",
+            "title": "Agent Memory Specification",
+            "section": "Agent Memory Specification",
+            "similarity": 0.54310286
+          },
+          {
+            "rank": 4,
+            "source": "openspec/specs/agent-memory/spec.md",
+            "title": "Agent Memory Specification",
+            "section": "Agent Memory Specification > Requirements > Requirement: Пользователь может проверить состав памяти",
+            "similarity": 0.43574885
+          },
+          {
+            "rank": 5,
+            "source": "openspec/specs/task-lifecycle/spec.md",
+            "title": "Task Lifecycle Specification",
+            "section": "Task Lifecycle Specification > Requirements > Requirement: Рабочая память влияет на ответ",
+            "similarity": 0.4109809
+          }
+        ]
+      }
+    },
+    {
+      "id": "task-phases",
+      "question": "Какова допустимая последовательность фаз задачи и кто может переводить задачу между фазами?",
+      "expectation": "Ответ должен дать planning -> execution -> validation -> done и пояснить, что переход выполняет пользователь без пропусков, а агент фазу сам не меняет.",
+      "required_fact_fragments": [
+        "planning",
+        "execution",
+        "validation",
+        "done",
+        "пользователь"
+      ],
+      "expected_sources": [
+        "openspec/specs/task-lifecycle/spec.md"
+      ],
+      "plain": {
+        "answer": "Уточните, пожалуйста, о какой системе или регламенте идёт речь. Пришлите название процесса либо ссылку/фрагмент документа с описанием фаз и ролей — тогда перечислю допустимые переходы и укажу, кто вправе их выполнять.",
+        "fact_coverage": 0.0,
+        "source_recall": 0.0,
+        "input_tokens": 98,
+        "output_tokens": 61,
+        "duration_ms": 3410,
+        "sources": []
+      },
+      "rag": {
+        "answer": "Допустима только фиксированная последовательность фаз:\n\n`planning → execution → validation → done`\n\n- Новая задача всегда начинается в `planning`.\n- Переход возможен только в следующую фазу — пропускать этапы нельзя [1][2].\n- `done` — терминальная фаза [1].\n- Каждый переход разрешается лишь после выполнения условий текущей фазы: утверждения плана, завершения всех пунктов выполнения или проверки соответственно [1].\n\nПереводить задачу между фазами может только пользователь — через явное подтверждение перехода. Агент вправе лишь предложить переход, но не может выполнить его самостоятельно [3][4]. Перед изменением система повторно проверяет условия по актуальному сохранённому состоянию; при их невыполнении фаза остаётся прежней [4].",
+        "fact_coverage": 1.0,
+        "source_recall": 1.0,
+        "input_tokens": 1043,
+        "output_tokens": 175,
+        "duration_ms": 4511,
+        "sources": [
+          {
+            "rank": 1,
+            "source": "openspec/specs/task-lifecycle/spec.md",
+            "title": "Task Lifecycle Specification",
+            "section": "Task Lifecycle Specification > Requirements > Requirement: Каждая задача проходит фиксированный pipeline",
+            "similarity": 0.580229
+          },
+          {
+            "rank": 2,
+            "source": "openspec/specs/task-lifecycle/spec.md",
+            "title": "Task Lifecycle Specification",
+            "section": "Task Lifecycle Specification > Requirements > Requirement: Каждая задача проходит фиксированный pipeline > Scenario: Нельзя пропустить фазу",
+            "similarity": 0.5636743
+          },
+          {
+            "rank": 3,
+            "source": "openspec/specs/task-lifecycle/spec.md",
+            "title": "Task Lifecycle Specification",
+            "section": "Task Lifecycle Specification > Requirements > Requirement: TODO хранится и изменяется явно > Scenario: Фаза остаётся под контролем пользователя",
+            "similarity": 0.5569525
+          },
+          {
+            "rank": 4,
+            "source": "openspec/specs/task-lifecycle/spec.md",
+            "title": "Task Lifecycle Specification",
+            "section": "Task Lifecycle Specification > Requirements > Requirement: Переход между фазами контролирует пользователь",
+            "similarity": 0.55470777
+          },
+          {
+            "rank": 5,
+            "source": "reports/day13/report.md",
+            "title": "День 13. Состояние задачи",
+            "section": "День 13. Состояние задачи > Модель",
+            "similarity": 0.5162934
+          }
+        ]
+      }
+    },
+    {
+      "id": "profile-session-boundary",
+      "question": "Что происходит с сессией, если после появления сообщений выбрать другой профиль персонализации?",
+      "expectation": "Прежняя сессия сохраняется, а для нового профиля начинается новая сессия, чтобы не смешивать инструкции.",
+      "required_fact_fragments": [
+        "нов",
+        "сесси",
+        "профил"
+      ],
+      "expected_sources": [
+        "openspec/specs/personalization-profile/spec.md"
+      ],
+      "plain": {
+        "answer": "При выборе другого профиля персонализации уже начатая сессия обычно не сбрасывается: история сообщений сохраняется, но новые ответы формируются с учётом выбранного профиля.\n\nТо есть:\n\n- предыдущие сообщения остаются в контексте;\n- уже полученные ответы не изменяются;\n- профиль применяется только к последующим ответам;\n- если новый профиль противоречит прежним установкам, возможен заметный переход в стиле или поведении.\n\nДля полностью «чистой» работы нового профиля лучше начать новую сессию.",
+        "fact_coverage": 1.0,
+        "source_recall": 0.0,
+        "input_tokens": 96,
+        "output_tokens": 118,
+        "duration_ms": 3584,
+        "sources": []
+      },
+      "rag": {
+        "answer": "Если после появления сообщений выбрать другой профиль персонализации, система:\n\n- сохраняет текущую сессию с прежним профилем;\n- создаёт новую сессию с выбранным профилем;\n- не смешивает историю и инструкции разных профилей в одной сессии [1][2][5].\n\nВ каждой сессии может использоваться не более одного профиля [2].",
+        "fact_coverage": 1.0,
+        "source_recall": 1.0,
+        "input_tokens": 740,
+        "output_tokens": 84,
+        "duration_ms": 3234,
+        "sources": [
+          {
+            "rank": 1,
+            "source": "openspec/specs/personalization-profile/spec.md",
+            "title": "Personalization Profile Specification",
+            "section": "Personalization Profile Specification > Requirements > Requirement: Использование профиля связано с сессией > Scenario: Смена профиля не смешивает историю",
+            "similarity": 0.6397763
+          },
+          {
+            "rank": 2,
+            "source": "openspec/specs/personalization-profile/spec.md",
+            "title": "Personalization Profile Specification",
+            "section": "Personalization Profile Specification > Requirements > Requirement: Использование профиля связано с сессией",
+            "similarity": 0.5759553
+          },
+          {
+            "rank": 3,
+            "source": "openspec/specs/personalization-profile/spec.md",
+            "title": "Personalization Profile Specification",
+            "section": "Personalization Profile Specification > Requirements > Requirement: Профиль описывает предпочтения ответа > Scenario: Загрузка профиля прежнего формата",
+            "similarity": 0.5544151
+          },
+          {
+            "rank": 4,
+            "source": "openspec/specs/personalization-profile/spec.md",
+            "title": "Personalization Profile Specification",
+            "section": "Personalization Profile Specification > Requirements > Requirement: Пользователь явно выбирает профиль > Scenario: Выбор сохранённого профиля",
+            "similarity": 0.5483017
+          },
+          {
+            "rank": 5,
+            "source": "openspec/specs/agent-memory/spec.md",
+            "title": "Agent Memory Specification",
+            "section": "Agent Memory Specification > Requirements > Requirement: Использование профиля связано с сессией",
+            "similarity": 0.53770614
+          }
+        ]
+      }
+    },
+    {
+      "id": "calendar-missing-time",
+      "question": "Как должен поступить агент при создании события, если пользователь не указал время начала или длительность?",
+      "expectation": "Агент обязан запросить недостающие сведения и не вызывать календарный инструмент, не подставляя скрытые значения по умолчанию.",
+      "required_fact_fragments": [
+        "запрос",
+        "недостающ",
+        "не",
+        "инструмент"
+      ],
+      "expected_sources": [
+        "openspec/specs/yandex-calendar-events/spec.md"
+      ],
+      "plain": {
+        "answer": "Агент должен сначала уточнить у пользователя недостающие время начала и/или длительность события и не вызывать инструмент создания события, пока эти данные не будут получены.",
+        "fact_coverage": 0.75,
+        "source_recall": 0.0,
+        "input_tokens": 99,
+        "output_tokens": 40,
+        "duration_ms": 2174,
+        "sources": []
+      },
+      "rag": {
+        "answer": "Агент должен запросить недостающие данные:\n\n- если не указано время начала — уточнить время [2];\n- если не указаны окончание или длительность — уточнить длительность [1].\n\nДо получения ответа нельзя подставлять значения по умолчанию, предлагать подтверждение создания или вызывать календарный инструмент [3].",
+        "fact_coverage": 1.0,
+        "source_recall": 1.0,
+        "input_tokens": 685,
+        "output_tokens": 75,
+        "duration_ms": 3129,
+        "sources": [
+          {
+            "rank": 1,
+            "source": "openspec/specs/yandex-calendar-events/spec.md",
+            "title": "spec",
+            "section": "Requirements > Requirement: Ambiguous natural-language requests are clarified > Scenario: Duration is missing",
+            "similarity": 0.64285946
+          },
+          {
+            "rank": 2,
+            "source": "openspec/specs/yandex-calendar-events/spec.md",
+            "title": "spec",
+            "section": "Requirements > Requirement: Ambiguous natural-language requests are clarified > Scenario: Time is missing",
+            "similarity": 0.62756807
+          },
+          {
+            "rank": 3,
+            "source": "openspec/specs/yandex-calendar-events/spec.md",
+            "title": "spec",
+            "section": "Requirements > Requirement: Ambiguous natural-language requests are clarified",
+            "similarity": 0.54688805
+          },
+          {
+            "rank": 4,
+            "source": "openspec/specs/yandex-calendar-events/spec.md",
+            "title": "spec",
+            "section": "Requirements > Requirement: Calendar tool declares a complete input contract > Scenario: Time range is invalid",
+            "similarity": 0.49790087
+          },
+          {
+            "rank": 5,
+            "source": "openspec/specs/task-lifecycle/spec.md",
+            "title": "Task Lifecycle Specification",
+            "section": "Task Lifecycle Specification > Requirements > Requirement: Задачи являются сохраняемой рабочей памятью > Scenario: Создание задачи",
+            "similarity": 0.4750363
+          }
+        ]
+      }
+    },
+    {
+      "id": "mcp-call-limits",
+      "question": "Какие лимиты действуют для top-level MCP tool calls и шагов одного pipeline в одном пользовательском запросе?",
+      "expectation": "Оба лимита равны восьми: максимум 8 top-level structured tool calls и 8 последовательных шагов pipeline.",
+      "required_fact_fragments": [
+        "восем",
+        "top-level",
+        "pipeline"
+      ],
+      "expected_sources": [
+        "openspec/specs/mcp-tool-execution/spec.md"
+      ],
+      "plain": {
+        "answer": "В рамках одного пользовательского запроса действуют лимиты:\n\n- **не более 8 top-level вызовов MCP-инструментов**;\n- **не более 16 шагов в одном pipeline**.\n\nПри превышении этих лимитов запрос нужно разбить на несколько отдельных обращений.",
+        "fact_coverage": 0.6666666666666666,
+        "source_recall": 0.0,
+        "input_tokens": 102,
+        "output_tokens": 62,
+        "duration_ms": 3453,
+        "sources": []
+      },
+      "rag": {
+        "answer": "В одном пользовательском запросе действуют такие лимиты:\n\n- **Не более 8 top-level structured MCP tool calls** [1].\n- **Не более 8 последовательных MCP-шагов в одном pipeline** [1].\n\nЕсли план pipeline содержит **более 8 шагов**, система отклоняет его **до выполнения первого шага** [2].",
+        "fact_coverage": 0.6666666666666666,
+        "source_recall": 1.0,
+        "input_tokens": 678,
+        "output_tokens": 78,
+        "duration_ms": 5177,
+        "sources": [
+          {
+            "rank": 1,
+            "source": "openspec/specs/mcp-tool-execution/spec.md",
+            "title": "spec",
+            "section": "Requirements > Requirement: Tool execution is constrained and fail-closed",
+            "similarity": 0.6500078
+          },
+          {
+            "rank": 2,
+            "source": "openspec/specs/mcp-tool-execution/spec.md",
+            "title": "spec",
+            "section": "Requirements > Requirement: Tool execution is constrained and fail-closed > Scenario: Pipeline step limit is reached",
+            "similarity": 0.54405195
+          },
+          {
+            "rank": 3,
+            "source": "openspec/specs/mcp-pipeline-execution/spec.md",
+            "title": "mcp-pipeline-execution Specification",
+            "section": "mcp-pipeline-execution Specification",
+            "similarity": 0.5394963
+          },
+          {
+            "rank": 4,
+            "source": "openspec/specs/mcp-tool-execution/spec.md",
+            "title": "spec",
+            "section": "Requirements > Requirement: Structured tool calls are executed and returned to the model",
+            "similarity": 0.52966094
+          },
+          {
+            "rank": 5,
+            "source": "openspec/specs/scheduled-pipeline-jobs/spec.md",
+            "title": "scheduled-pipeline-jobs Specification",
+            "section": "scheduled-pipeline-jobs Specification > Purpose",
+            "similarity": 0.5194102
+          }
+        ]
+      }
+    },
+    {
+      "id": "scheduled-digest-architecture",
+      "question": "Как должна быть представлена периодическая календарная сводка в scheduler?",
+      "expectation": "Как обычное задание orchestrator со стадиями чтения событий, изолированной AI-обработки и Telegram-доставки, без специального calendar runner.",
+      "required_fact_fragments": [
+        "orchestrator",
+        "изолирован",
+        "telegram",
+        "calendar runner"
+      ],
+      "expected_sources": [
+        "openspec/specs/scheduled-background-jobs/spec.md"
+      ],
+      "plain": {
+        "answer": "Периодическая календарная сводка в `scheduler` должна быть представлена как **повторяющаяся задача по расписанию**, а не как отдельное календарное событие:\n\n- **Расписание** — cron-выражение или правило повторения с указанием часового пояса, например `Europe/Moscow`.\n- **Действие** — получить события календаря за заданный период и сформировать сводку.\n- **Период обзора** — например, события на сегодня, завтра или ближайшую неделю.\n- **Канал доставки** — куда отправлять результат.\n- **Формат сводки** — время, название, календарь, место, участники и конфликты.\n\nПример концептуального представления:\n\n```json\n{\n  \"type\": \"recurring_calendar_summary\",\n  \"schedule\": {\n    \"cron\": \"0 8 * * 1-5\",\n    \"timezone\": \"Europe/Moscow\"\n  },\n  \"query\": {\n    \"range\": \"today\",\n    \"calendars\": [\"primary\"]\n  },\n  \"output\": {\n    \"format\": \"agenda\",\n    \"include\": [\"start_time\", \"title\", \"location\", \"conflicts\"]\n  }\n}\n```\n\nТо есть scheduler хранит **правило запуска и параметры формирования**, а сами календарные события извлекаются заново при каждом запуске.",
+        "fact_coverage": 0.0,
+        "source_recall": 0.0,
+        "input_tokens": 93,
+        "output_tokens": 292,
+        "duration_ms": 4346,
+        "sources": []
+      },
+      "rag": {
+        "answer": "Периодическая календарная сводка в scheduler должна быть представлена как **обычное задание orchestrator**, состоящее из стадий:\n\n1. чтение календарных событий;\n2. изолированная AI-обработка;\n3. доставка результата в Telegram.\n\nДля неё **не должны** использоваться специальный calendar runner или calendar-specific поля хранения [1].\n\nПри чтении событий можно применять `list_events` с абсолютным полуоткрытым интервалом `[from, to)` либо с ограниченным относительным окном, где явно заданы точка отсчёта, тип периода и часовой пояс [2].",
+        "fact_coverage": 1.0,
+        "source_recall": 1.0,
+        "input_tokens": 772,
+        "output_tokens": 135,
+        "duration_ms": 3565,
+        "sources": [
+          {
+            "rank": 1,
+            "source": "openspec/specs/scheduled-background-jobs/spec.md",
+            "title": "scheduled-background-jobs Specification",
+            "section": "scheduled-background-jobs Specification > Requirements > Requirement: Calendar digest is a generic scheduled pipeline",
+            "similarity": 0.53588694
+          },
+          {
+            "rank": 2,
+            "source": "openspec/specs/yandex-calendar-events/spec.md",
+            "title": "spec",
+            "section": "Requirements > Requirement: Calendar events can be read for an absolute interval",
+            "similarity": 0.4875792
+          },
+          {
+            "rank": 3,
+            "source": "openspec/specs/yandex-calendar-events/spec.md",
+            "title": "spec",
+            "section": "Requirements > Requirement: Calendar target is selected without guessing",
+            "similarity": 0.48370117
+          },
+          {
+            "rank": 4,
+            "source": "openspec/specs/yandex-calendar-events/spec.md",
+            "title": "spec",
+            "section": "Requirements > Requirement: Calendar tool declares a complete input contract",
+            "similarity": 0.4722797
+          },
+          {
+            "rank": 5,
+            "source": "openspec/specs/yandex-calendar-events/spec.md",
+            "title": "spec",
+            "section": "Requirements > Requirement: Calendar server exposes only calendar capabilities",
+            "similarity": 0.4509677
+          }
+        ]
+      }
+    },
+    {
+      "id": "telegram-unknown-delivery",
+      "question": "Что означает результат доставки Telegram unknown и можно ли автоматически повторять такую отправку?",
+      "expectation": "Unknown означает потерю соединения после отправки при неизвестном факте принятия сообщения; автоматический повтор запрещён.",
+      "required_fact_fragments": [
+        "unknown",
+        "потер",
+        "не",
+        "повтор"
+      ],
+      "expected_sources": [
+        "openspec/specs/telegram-digest-delivery/spec.md"
+      ],
+      "plain": {
+        "answer": "Статус доставки Telegram `unknown` обычно означает, что система **не смогла однозначно определить результат отправки**. Например, запрос мог уйти в Telegram, но подтверждение не было получено из‑за тайм‑аута, сетевого сбоя или ошибки интеграции. Это не обязательно значит, что сообщение не доставлено.\n\nАвтоматический повтор возможен, но есть риск **дублирования**: исходное сообщение могло успешно попасть адресату, хотя статус остался `unknown`.\n\nРекомендуемая логика:\n\n- повторять только после небольшой задержки;\n- использовать ограниченное число попыток и увеличивающиеся интервалы, например 30 секунд, 2 минуты, 10 минут;\n- если платформа поддерживает идемпотентность или уникальный ключ отправки — обязательно применять его;\n- перед повтором проверять доступный статус сообщения;\n- для важных уведомлений помечать повтор как возможный дубль или переводить неопределённые отправки на ручную проверку.\n\nИтого: **повторять можно, но без идемпотентности нельзя гарантировать отсутствие дублей**. Точная трактовка `unknown` зависит от сервиса или API, который отправляет сообщения через Telegram.",
+        "fact_coverage": 0.75,
+        "source_recall": 0.0,
+        "input_tokens": 94,
+        "output_tokens": 262,
+        "duration_ms": 4232,
+        "sources": []
+      },
+      "rag": {
+        "answer": "Результат `unknown` означает, что после отправки запроса соединение прервалось и система не смогла определить, принял ли Telegram сообщение. Это не подтверждённая доставка (`delivered`) и не однозначный отказ (`failed`) [2][3].\n\nАвтоматически повторять такую отправку **нельзя**: исходное сообщение могло быть доставлено, поэтому повтор создаст дубликат. Запись с `unknown` сохраняется в истории и должна быть проверена либо перезапущена вручную [1][3].",
+        "fact_coverage": 0.75,
+        "source_recall": 1.0,
+        "input_tokens": 768,
+        "output_tokens": 119,
+        "duration_ms": 3904,
+        "sources": [
+          {
+            "rank": 1,
+            "source": "openspec/specs/telegram-digest-delivery/spec.md",
+            "title": "telegram-digest-delivery Specification",
+            "section": "telegram-digest-delivery Specification > Requirements > Requirement: Delivery outcome is recorded without false success > Scenario: Delivery outcome is uncertain",
+            "similarity": 0.69122505
+          },
+          {
+            "rank": 2,
+            "source": "openspec/specs/telegram-message-delivery/spec.md",
+            "title": "telegram-message-delivery Specification",
+            "section": "telegram-message-delivery Specification > Requirements > Requirement: Telegram outcome is explicit and non-retriable when uncertain",
+            "similarity": 0.65114766
+          },
+          {
+            "rank": 3,
+            "source": "openspec/specs/telegram-digest-delivery/spec.md",
+            "title": "telegram-digest-delivery Specification",
+            "section": "telegram-digest-delivery Specification > Requirements > Requirement: Delivery outcome is recorded without false success",
+            "similarity": 0.61301017
+          },
+          {
+            "rank": 4,
+            "source": "openspec/specs/telegram-digest-delivery/spec.md",
+            "title": "telegram-digest-delivery Specification",
+            "section": "telegram-digest-delivery Specification > Requirements > Requirement: Delivery outcome is recorded without false success > Scenario: Telegram accepts the message",
+            "similarity": 0.5759076
+          },
+          {
+            "rank": 5,
+            "source": "openspec/specs/telegram-digest-delivery/spec.md",
+            "title": "telegram-digest-delivery Specification",
+            "section": "telegram-digest-delivery Specification > Requirements > Requirement: Delivery outcome is recorded without false success > Scenario: Telegram rejects the message",
+            "similarity": 0.541823
+          }
+        ]
+      }
+    },
+    {
+      "id": "github-report-sections",
+      "question": "Какие обязательные разделы должен содержать Markdown-отчёт по GitHub-проекту?",
+      "expectation": "Нужно перечислить Overview, Development, Collaboration, Delivery, Data coverage и Warnings.",
+      "required_fact_fragments": [
+        "overview",
+        "development",
+        "collaboration",
+        "delivery",
+        "data coverage",
+        "warnings"
+      ],
+      "expected_sources": [
+        "openspec/specs/github-project-reporting/spec.md"
+      ],
+      "plain": {
+        "answer": "Единого обязательного стандарта нет, но хороший Markdown-отчёт по GitHub-проекту обычно содержит:\n\n1. **Название проекта**\n   - Название репозитория и краткое описание.\n\n2. **Цель отчёта**\n   - Что анализируется: состояние проекта, прогресс, качество кода, активность сообщества и т. п.\n\n3. **Общая информация**\n   - Ссылка на репозиторий.\n   - Основной язык и стек технологий.\n   - Лицензия.\n   - Текущая версия или последний релиз.\n\n4. **Статус проекта**\n   - Активен ли проект.\n   - Дата последнего обновления.\n   - Состояние основной ветки и CI/CD.\n\n5. **Функциональность**\n   - Основные возможности.\n   - Реализованные и планируемые функции.\n   - Известные ограничения.\n\n6. **Установка и запуск**\n   - Требования.\n   - Команды установки.\n   - Пример запуска и проверки работоспособности.\n\n7. **Структура репозитория**\n   - Назначение ключевых каталогов и файлов.\n\n8. **Качество и тестирование**\n   - Наличие и типы тестов.\n   - Покрытие.\n   - Линтеры, форматирование и статический анализ.\n\n9. **Активность разработки**\n   - Коммиты, pull requests и issues.\n   - Основные участники.\n   - Темп выпуска релизов.\n\n10. **Проблемы и риски**\n    - Открытые критические issues.\n    - Технический долг.\n    - Уязвимости и устаревшие зависимости.\n\n11. **Выводы и рекомендации**\n    - Итоговая оценка.\n    - Приоритетные следующие шаги.\n\n12. **Источники и дата анализа**\n    - Использованные страницы, файлы и метрики.\n    - Дата, на которую актуален отчёт.\n\nМинимальный шаблон:\n\n```markdown\n# Отчёт по проекту `<project-name>`\n\n## 1. Цель отчёта\n\n## 2. Общая информация\n- Репозиторий:\n- Лицензия:\n- Основной язык:\n- Последний релиз:\n\n## 3. Статус проекта\n\n## 4. Основная функциональность\n\n## 5. Установка и запуск\n\n## 6. Структура репозитория\n\n## 7. Тестирование и качество кода\n\n## 8. Активность разработки\n\n## 9. Проблемы и риски\n\n## 10. Выводы и рекомендации\n\n## 11. Источники и дата анализа\n```\n\nЕсли отчёт создаётся по формальному заданию, «обязательными» считаются прежде всего разделы, прямо указанные в его требованиях; приведённый список — универсальная рекомендуемая структура.",
+        "fact_coverage": 0.0,
+        "source_recall": 0.0,
+        "input_tokens": 99,
+        "output_tokens": 622,
+        "duration_ms": 7641,
+        "sources": []
+      },
+      "rag": {
+        "answer": "Markdown-отчёт по GitHub-проекту должен содержать обязательные разделы [1]:\n\n- `Overview`\n- `Development`\n- `Collaboration`\n- `Delivery`\n- `Data coverage`\n- `Warnings`\n\nДополнительно отчёт должен:\n\n- показывать исходные счётчики рядом с производными метриками;\n- различать полученные, рассчитанные, усечённые и недоступные данные [1];\n- в `Data coverage` указывать статус каждого источника;\n- явно отмечать `unavailable` и выводить предупреждения при недоступности источника или усечённой выборке [4];\n- не включать произвольные секреты или содержимое локальных файлов [1].",
+        "fact_coverage": 1.0,
+        "source_recall": 1.0,
+        "input_tokens": 985,
+        "output_tokens": 155,
+        "duration_ms": 3646,
+        "sources": [
+          {
+            "rank": 1,
+            "source": "openspec/specs/github-project-reporting/spec.md",
+            "title": "github-project-reporting Specification",
+            "section": "github-project-reporting Specification > Requirements > Requirement: GitHub report is rendered from structured metrics",
+            "similarity": 0.7392248
+          },
+          {
+            "rank": 2,
+            "source": "openspec/specs/github-project-reporting/spec.md",
+            "title": "github-project-reporting Specification",
+            "section": "github-project-reporting Specification > Requirements > Requirement: GitHub and reporting responsibilities are isolated",
+            "similarity": 0.67209166
+          },
+          {
+            "rank": 3,
+            "source": "openspec/specs/github-project-reporting/spec.md",
+            "title": "github-project-reporting Specification",
+            "section": "github-project-reporting Specification",
+            "similarity": 0.624735
+          },
+          {
+            "rank": 4,
+            "source": "reports/day19/README.md",
+            "title": "День 19. Композиция MCP-инструментов",
+            "section": "День 19. Композиция MCP-инструментов > Доступные GitHub-метрики",
+            "similarity": 0.58286744
+          },
+          {
+            "rank": 5,
+            "source": "openspec/specs/github-project-reporting/spec.md",
+            "title": "github-project-reporting Specification",
+            "section": "github-project-reporting Specification > Requirements > Requirement: Agent can compose the GitHub report pipeline",
+            "similarity": 0.5747819
+          }
+        ]
+      }
+    }
+  ],
+  "plain": {
+    "mean_fact_coverage": 0.3833333333333333,
+    "mean_source_recall": 0.0,
+    "input_tokens": 976,
+    "output_tokens": 1772,
+    "duration_ms": 42744
+  },
+  "rag": {
+    "mean_fact_coverage": 0.775,
+    "mean_source_recall": 0.9,
+    "input_tokens": 8474,
+    "output_tokens": 1125,
+    "duration_ms": 46606
+  }
+}

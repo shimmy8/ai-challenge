@@ -69,6 +69,39 @@ JSON и сообщения об ошибках не содержат API key, т
 [`reports/day21/README.md`](reports/day21/README.md), а поведенческий контракт —
 в [`openspec/specs/document-indexing/spec.md`](openspec/specs/document-indexing/spec.md).
 
+## RAG-запросы и сравнение качества
+
+После построения structural-индекса интерактивный клиент поддерживает два режима:
+
+```text
+/rag on      включить retrieval для следующих вопросов
+/rag off     вернуться к обычным ответам модели
+/rag status  показать текущее состояние
+```
+
+При запуске RAG выключен. В режиме `on` вопрос преобразуется в embedding,
+приложение выбирает до пяти structural-чанков по cosine similarity и передаёт
+их модели как явно отделённый недоверенный контекст. После ответа CLI показывает
+фактически переданные фрагменты в формате `[N] source — section (similarity)`.
+В историю сессии сохраняется исходный вопрос без служебного RAG-envelope.
+
+Если `.fox-index.db` или `.fox-embeddings.json` отсутствует либо индекс
+несовместим по model/dimensions, RAG-запрос завершается понятной ошибкой до
+chat-запроса. Автоматического перехода в режим без RAG нет.
+
+Воспроизводимое сравнение 10 контрольных вопросов запускается отдельно:
+
+```bash
+cargo run -- rag-eval \
+  --questions reports/day22/control-questions.json \
+  --output reports/day22/comparison.json
+```
+
+Команда использует текущие chat-настройки, выполняет независимые пары без
+памяти, профиля, MCP и истории и атомарно записывает sanitized JSON. Набор
+вопросов, результаты и разбор качества описаны в
+[`reports/day22/README.md`](reports/day22/README.md).
+
 ## MCP
 
 MCP разбит на независимые loopback-серверы. Каждый процесс запускается с явным

@@ -2,14 +2,18 @@ mod chunking;
 mod config;
 mod documents;
 mod embeddings;
+mod evaluation;
 mod index;
 mod metrics;
+mod retrieval;
 
 pub(crate) use chunking::*;
 pub(crate) use config::*;
 pub(crate) use documents::*;
 pub(crate) use embeddings::*;
+pub(crate) use evaluation::*;
 pub(crate) use metrics::*;
+pub(crate) use retrieval::*;
 
 use anyhow::{Context, Result};
 use reqwest::Client;
