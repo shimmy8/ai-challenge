@@ -1,0 +1,72 @@
+[
+  {
+    "id": "chunking-defaults",
+    "question": "Каковы значения chunk_size и chunk_overlap по умолчанию при fixed chunking?",
+    "expectation": "Ответ должен назвать размер чанка 1200 Unicode-символов и overlap 200 символов.",
+    "required_fact_fragments": ["1200", "200"],
+    "expected_sources": ["openspec/specs/document-indexing/spec.md"]
+  },
+  {
+    "id": "day21-strategy-comparison",
+    "question": "Сколько чанков создали fixed и structural в фактическом эксперименте Дня 21 и какая стратегия рекомендована для retrieval?",
+    "expectation": "Ответ должен указать 292 fixed-чанка, 662 structural-чанка и рекомендацию structural для retrieval.",
+    "required_fact_fragments": ["292", "662", "structural"],
+    "expected_sources": ["reports/day21/README.md"]
+  },
+  {
+    "id": "memory-layers",
+    "question": "Какие три слоя памяти определены у агента и что представляет каждый из них?",
+    "expectation": "Нужно перечислить краткосрочную историю сессии, рабочее состояние задачи и долговременный выбранный профиль, отметив их раздельное хранение.",
+    "required_fact_fragments": ["краткосроч", "рабоч", "долговрем"],
+    "expected_sources": ["openspec/specs/agent-memory/spec.md"]
+  },
+  {
+    "id": "task-phases",
+    "question": "Какова допустимая последовательность фаз задачи и кто может переводить задачу между фазами?",
+    "expectation": "Ответ должен дать planning -> execution -> validation -> done и пояснить, что переход выполняет пользователь без пропусков, а агент фазу сам не меняет.",
+    "required_fact_fragments": ["planning", "execution", "validation", "done", "пользователь"],
+    "expected_sources": ["openspec/specs/task-lifecycle/spec.md"]
+  },
+  {
+    "id": "profile-session-boundary",
+    "question": "Что происходит с сессией, если после появления сообщений выбрать другой профиль персонализации?",
+    "expectation": "Прежняя сессия сохраняется, а для нового профиля начинается новая сессия, чтобы не смешивать инструкции.",
+    "required_fact_fragments": ["нов", "сесси", "профил"],
+    "expected_sources": ["openspec/specs/personalization-profile/spec.md"]
+  },
+  {
+    "id": "calendar-missing-time",
+    "question": "Как должен поступить агент при создании события, если пользователь не указал время начала или длительность?",
+    "expectation": "Агент обязан запросить недостающие сведения и не вызывать календарный инструмент, не подставляя скрытые значения по умолчанию.",
+    "required_fact_fragments": ["запрос", "недостающ", "не", "инструмент"],
+    "expected_sources": ["openspec/specs/yandex-calendar-events/spec.md"]
+  },
+  {
+    "id": "mcp-call-limits",
+    "question": "Какие лимиты действуют для top-level MCP tool calls и шагов одного pipeline в одном пользовательском запросе?",
+    "expectation": "Оба лимита равны восьми: максимум 8 top-level structured tool calls и 8 последовательных шагов pipeline.",
+    "required_fact_fragments": ["восем", "top-level", "pipeline"],
+    "expected_sources": ["openspec/specs/mcp-tool-execution/spec.md"]
+  },
+  {
+    "id": "scheduled-digest-architecture",
+    "question": "Как должна быть представлена периодическая календарная сводка в scheduler?",
+    "expectation": "Как обычное задание orchestrator со стадиями чтения событий, изолированной AI-обработки и Telegram-доставки, без специального calendar runner.",
+    "required_fact_fragments": ["orchestrator", "изолирован", "telegram", "calendar runner"],
+    "expected_sources": ["openspec/specs/scheduled-background-jobs/spec.md"]
+  },
+  {
+    "id": "telegram-unknown-delivery",
+    "question": "Что означает результат доставки Telegram unknown и можно ли автоматически повторять такую отправку?",
+    "expectation": "Unknown означает потерю соединения после отправки при неизвестном факте принятия сообщения; автоматический повтор запрещён.",
+    "required_fact_fragments": ["unknown", "потер", "не", "повтор"],
+    "expected_sources": ["openspec/specs/telegram-digest-delivery/spec.md"]
+  },
+  {
+    "id": "github-report-sections",
+    "question": "Какие обязательные разделы должен содержать Markdown-отчёт по GitHub-проекту?",
+    "expectation": "Нужно перечислить Overview, Development, Collaboration, Delivery, Data coverage и Warnings.",
+    "required_fact_fragments": ["overview", "development", "collaboration", "delivery", "data coverage", "warnings"],
+    "expected_sources": ["openspec/specs/github-project-reporting/spec.md"]
+  }
+]

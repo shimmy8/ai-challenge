@@ -20,7 +20,7 @@ mod suite {
     use crate::app::{
         activate_memory_context, advance_task_if_confirmed, create_memory_entry_if_confirmed,
         create_profile_if_confirmed, create_task_if_confirmed, forget_memory_entry_if_confirmed,
-        handle_profile_command, handle_remember_command, handle_task_command,
+        handle_profile_command, handle_rag_command, handle_remember_command, handle_task_command,
         persist_answer_task_update, task_phase_completion_message, task_phase_continue_instruction,
         task_phase_start_instruction, task_transition_prompt, ProfileCommandOutcome,
         TaskCommandOutcome, TaskUpdateProgress,
@@ -1278,6 +1278,20 @@ mod suite {
             "10".into(),
         ])
         .is_err());
+        assert_eq!(
+            parse_startup_mode(vec![
+                "rag-eval".into(),
+                "--questions".into(),
+                "reports/day22/control-questions.json".into(),
+                "--output".into(),
+                "reports/day22/comparison.json".into(),
+            ])
+            .unwrap(),
+            StartupMode::RagEval(RagEvalOptions {
+                questions: "reports/day22/control-questions.json".into(),
+                output: "reports/day22/comparison.json".into(),
+            })
+        );
     }
 
     #[test]
@@ -4252,5 +4266,52 @@ mod suite {
         assert!(persist_answer_task_update(&store, &mut agents, answer).is_none());
         assert_eq!(store.load_task(task.id).unwrap(), task);
         assert_eq!(agents.memory().task.unwrap().phase, TaskPhase::Execution);
+    }
+
+    #[tokio::test]
+    async fn ephemeral_request_content_does_not_pollute_agent_history() {
+        let client = ScriptedClient::new(vec![scripted_answer("Ответ")]);
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client.clone();
+
+        let answer = agent
+            .ask_with_context("Исходный вопрос", Some("RAG envelope с контекстом"))
+            .await
+            .unwrap();
+
+        assert_eq!(answer.input_tokens, 3);
+        let calls = client.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].1.last().unwrap().content,
+            "RAG envelope с контекстом"
+        );
+        assert_eq!(agent.history[0].content, "Исходный вопрос");
+        assert_eq!(agent.persisted_history[0].content, "Исходный вопрос");
+        assert_eq!(agent.history[1].content, "Ответ");
+    }
+
+    #[test]
+    fn rag_commands_toggle_and_report_process_state() {
+        let mut enabled = false;
+        assert_eq!(
+            handle_rag_command("/rag status", &mut enabled).unwrap(),
+            "RAG выключен."
+        );
+        assert_eq!(
+            handle_rag_command("/rag on", &mut enabled).unwrap(),
+            "RAG включён."
+        );
+        assert!(enabled);
+        assert_eq!(
+            handle_rag_command("/rag", &mut enabled).unwrap(),
+            "RAG включён."
+        );
+        assert_eq!(
+            handle_rag_command("/rag off", &mut enabled).unwrap(),
+            "RAG выключен."
+        );
+        assert!(!enabled);
+        assert!(handle_rag_command("/rag maybe", &mut enabled).is_err());
     }
 }

@@ -1,6 +1,6 @@
 use crate::rag::{Chunk, ComparisonReport, Document, EmbeddingDescriptor, IndexStrategy};
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::{collections::HashMap, fs, path::Path};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -8,6 +8,16 @@ pub(crate) struct StoredEmbedding {
     pub(crate) content_hash: String,
     pub(crate) model: String,
     pub(crate) dimensions: usize,
+    pub(crate) vector: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct IndexedChunk {
+    pub(crate) chunk_id: String,
+    pub(crate) source: String,
+    pub(crate) title: String,
+    pub(crate) section: String,
+    pub(crate) content: String,
     pub(crate) vector: Vec<f32>,
 }
 
@@ -73,6 +83,81 @@ impl IndexStore {
              );",
         )?;
         Ok(Self { connection })
+    }
+
+    pub(crate) fn open_read_only(path: &Path) -> Result<Self> {
+        anyhow::ensure!(
+            path.is_file(),
+            "RAG-индекс {} не найден; сначала выполните cargo run -- index",
+            path.display()
+        );
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| format!("не удалось открыть RAG-индекс {}", path.display()))?;
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .context("не удалось проверить RAG-индекс")?;
+        Ok(Self { connection })
+    }
+
+    pub(crate) fn load_structural_chunks(
+        &self,
+        descriptor: &EmbeddingDescriptor,
+    ) -> Result<Vec<IndexedChunk>> {
+        let structural_count = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE strategy = 'structural'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("RAG-индекс повреждён или имеет неподдерживаемую схему")?;
+        anyhow::ensure!(
+            structural_count > 0,
+            "RAG-индекс не содержит structural-чанков; выполните переиндексацию"
+        );
+
+        let mut statement = self.connection.prepare(
+            "SELECT c.chunk_id, c.source, c.title, c.section, c.content, e.vector_blob
+             FROM chunks c
+             JOIN embeddings e
+               ON e.content_hash = c.content_hash
+              AND e.model = c.model
+              AND e.dimensions = c.dimensions
+             WHERE c.strategy = 'structural'
+               AND c.model = ?1
+               AND c.dimensions = ?2
+             ORDER BY c.chunk_id",
+        )?;
+        let rows = statement.query_map(
+            params![descriptor.model, descriptor.dimensions as i64],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                ))
+            },
+        )?;
+        let mut chunks = Vec::new();
+        for row in rows {
+            let (chunk_id, source, title, section, content, blob) = row?;
+            chunks.push(IndexedChunk {
+                chunk_id,
+                source,
+                title,
+                section,
+                content,
+                vector: decode_vector(&blob, descriptor.dimensions)?,
+            });
+        }
+        anyhow::ensure!(
+            !chunks.is_empty(),
+            "RAG-индекс несовместим с embedding model/dimensions; выполните переиндексацию"
+        );
+        Ok(chunks)
     }
 
     pub(crate) fn load_cached(
@@ -341,6 +426,55 @@ mod tests {
                 [],
             )
             .is_err());
+    }
+
+    #[test]
+    fn read_only_store_loads_only_compatible_structural_chunks() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("index.db");
+        let mut store = IndexStore::open(&path).unwrap();
+        let mut structural = chunk();
+        structural.strategy = IndexStrategy::Structural;
+        let mut report = comparison();
+        report.model = "fake-model".into();
+        store
+            .publish(
+                &[document()],
+                &[structural],
+                &[embedding()],
+                &[IndexStrategy::Structural],
+                "{}",
+                &report,
+            )
+            .unwrap();
+        drop(store);
+
+        let descriptor = EmbeddingDescriptor {
+            provider: "fake".into(),
+            endpoint_origin: "local://fake".into(),
+            model: "fake-model".into(),
+            dimensions: 2,
+            batch_size: 8,
+        };
+        let store = IndexStore::open_read_only(&path).unwrap();
+        let chunks = store.load_structural_chunks(&descriptor).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].content, "text");
+        let incompatible = EmbeddingDescriptor {
+            model: "other".into(),
+            ..descriptor.clone()
+        };
+        assert!(store.load_structural_chunks(&incompatible).is_err());
+        drop(store);
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute("UPDATE embeddings SET vector_blob = X'00'", [])
+            .unwrap();
+        drop(connection);
+        let store = IndexStore::open_read_only(&path).unwrap();
+        assert!(store.load_structural_chunks(&descriptor).is_err());
+        assert!(IndexStore::open_read_only(&directory.path().join("missing.db")).is_err());
     }
 
     #[test]

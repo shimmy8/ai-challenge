@@ -130,6 +130,9 @@ pub(crate) async fn run() -> Result<()> {
     if let StartupMode::Index(options) = startup_mode {
         return run_indexing(options).await;
     }
+    if let StartupMode::RagEval(options) = startup_mode {
+        return run_rag_evaluation(options).await;
+    }
     let StartupMode::Interactive { dump_metrics } = startup_mode else {
         unreachable!();
     };
@@ -141,6 +144,7 @@ pub(crate) async fn run() -> Result<()> {
     let sessions = SessionStore::open(&sessions_path()?)?;
     let metrics_log_path = dump_metrics.then(metrics_path).transpose()?;
     let mut active_session_id = None;
+    let mut rag_enabled = false;
     let mut provider = match config.last_provider {
         Some(saved) => saved,
         None => choose_provider()?,
@@ -188,7 +192,7 @@ pub(crate) async fn run() -> Result<()> {
     ));
     let mut editor = Editor::<CommandHelper, DefaultHistory>::new()?;
     editor.set_helper(Some(CommandHelper::new(branching_commands_enabled.clone())));
-    loop {
+    'interactive: loop {
         let displayed_memory = agents.memory();
         show_status_bar(StatusBar {
             provider,
@@ -197,6 +201,7 @@ pub(crate) async fn run() -> Result<()> {
             temperature: config.temperature(provider)?,
             strategy: config.compression_strategy,
             context_messages: config.context_messages,
+            rag_enabled,
             active_branch: agents.agents.first().map(|agent| {
                 if agent.branch_pending {
                     "checkpoint"
@@ -473,6 +478,15 @@ pub(crate) async fn run() -> Result<()> {
                 }
                 continue;
             }
+            command if command == "/rag" || command.starts_with("/rag ") => {
+                match handle_rag_command(command, &mut rag_enabled) {
+                    Ok(message) => println!("{}", style(message).yellow()),
+                    Err(error) => {
+                        eprintln!("{} {error:#}", style("Команда RAG не выполнена:").red())
+                    }
+                }
+                continue;
+            }
             command if command == "/profile" || command.starts_with("/profile ") => {
                 let current = agents.memory();
                 match handle_profile_command(command, &sessions, current.profile.as_ref())? {
@@ -646,7 +660,20 @@ pub(crate) async fn run() -> Result<()> {
             }
             _ => {}
         }
+        let user_question = automatic_input.is_none();
         let mut request_input = automatic_input.unwrap_or(input);
+        let mut rag_chunks = if rag_enabled && user_question {
+            let root = std::env::current_dir()?.canonicalize()?;
+            match retrieve(&root, &request_input).await {
+                Ok(chunks) => Some(chunks),
+                Err(error) => {
+                    eprintln!("{} {error:#}\n", style("RAG-запрос не выполнен:").red());
+                    continue 'interactive;
+                }
+            }
+        } else {
+            None
+        };
         loop {
             print!("{} ", style("● Агент 1 · выполняется…").yellow());
             std::io::stdout().flush()?;
@@ -654,7 +681,17 @@ pub(crate) async fn run() -> Result<()> {
                 .agents
                 .first()
                 .is_some_and(|agent| agent.branch_pending);
-            let mut results = agents.ask_all(&request_input).await;
+            let rag_prompt = rag_chunks
+                .as_ref()
+                .map(|chunks| build_rag_prompt(&request_input, chunks))
+                .transpose()?;
+            let mut results = if let Some(prompt) = rag_prompt.as_deref() {
+                agents
+                    .ask_all_with_context(&request_input, Some(prompt))
+                    .await
+            } else {
+                agents.ask_all(&request_input).await
+            };
             let mut task_progress = None;
             for run in &mut results {
                 let Ok(answer) = &mut run.result else {
@@ -744,6 +781,13 @@ pub(crate) async fn run() -> Result<()> {
                         if let Some(warning) = &answer.task_update_warning {
                             eprintln!("{} {warning}", style("Предупреждение задачи:").yellow());
                         }
+                        if let Some(chunks) = &rag_chunks {
+                            println!(
+                                "{}\n{}\n",
+                                style("Переданные RAG-источники:").yellow().bold(),
+                                format_sources(chunks)
+                            );
+                        }
                         println!(
                             "{}\n",
                             style(format!(
@@ -772,6 +816,7 @@ pub(crate) async fn run() -> Result<()> {
                         break;
                     };
                     request_input = instruction.to_owned();
+                    rag_chunks = None;
                 }
                 Some(TaskUpdateProgress::Completed(phase)) => {
                     if let Some(message) = task_phase_completion_message(phase) {
@@ -785,6 +830,28 @@ pub(crate) async fn run() -> Result<()> {
     }
     println!("{}", style("До встречи! 🦊").magenta());
     Ok(())
+}
+
+pub(crate) fn handle_rag_command(command: &str, enabled: &mut bool) -> Result<String> {
+    match command.strip_prefix("/rag").unwrap_or_default().trim() {
+        "on" => {
+            *enabled = true;
+            Ok("RAG включён.".to_owned())
+        }
+        "off" => {
+            *enabled = false;
+            Ok("RAG выключен.".to_owned())
+        }
+        "" | "status" => Ok(format!(
+            "RAG {}.",
+            if *enabled {
+                "включён"
+            } else {
+                "выключен"
+            }
+        )),
+        _ => bail!("используйте /rag on, /rag off или /rag status"),
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

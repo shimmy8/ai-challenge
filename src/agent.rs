@@ -404,9 +404,17 @@ impl Agent {
     }
 
     pub(crate) async fn ask(&mut self, input: &str) -> Result<ApiAnswer> {
+        self.ask_with_context(input, None).await
+    }
+
+    pub(crate) async fn ask_with_context(
+        &mut self,
+        input: &str,
+        request_content: Option<&str>,
+    ) -> Result<ApiAnswer> {
         let before = self.request_state();
         self.status = AgentStatus::Running;
-        let result = self.ask_inner(input).await;
+        let result = self.ask_inner(input, request_content).await;
         if let Err(error) = &result {
             self.restore_request_state(before);
             self.status = AgentStatus::Failed(error.to_string());
@@ -414,7 +422,7 @@ impl Agent {
         result
     }
 
-    async fn ask_inner(&mut self, input: &str) -> Result<ApiAnswer> {
+    async fn ask_inner(&mut self, input: &str, request_content: Option<&str>) -> Result<ApiAnswer> {
         self.prepare_context(input).await?;
         if self.settings.compression_strategy == CompressionStrategy::Branching
             && self.branch_pending
@@ -429,6 +437,13 @@ impl Agent {
             role: "user".to_owned(),
             content: input.to_owned(),
         });
+        let mut request_history = self.history.clone();
+        if let Some(content) = request_content {
+            let current = request_history
+                .last_mut()
+                .context("не удалось подготовить RAG-запрос")?;
+            current.content = content.to_owned();
+        }
 
         let tool_definitions = self
             .tool_executor
@@ -449,7 +464,7 @@ impl Agent {
             .send_with_options(
                 &self.client,
                 &self.request_settings(),
-                &self.history,
+                &request_history,
                 &request_options,
             )
             .await?;
@@ -537,7 +552,7 @@ impl Agent {
                 .send_with_options(
                     &self.client,
                     &self.request_settings(),
-                    &self.history,
+                    &request_history,
                     &request_options,
                 )
                 .await
@@ -1399,14 +1414,27 @@ impl AgentPool {
     }
 
     pub(crate) async fn ask_all(&mut self, input: &str) -> Vec<AgentRunResult> {
+        self.ask_all_with_context(input, None).await
+    }
+
+    pub(crate) async fn ask_all_with_context(
+        &mut self,
+        input: &str,
+        request_content: Option<&str>,
+    ) -> Vec<AgentRunResult> {
         let mut tasks = tokio::task::JoinSet::new();
         for mut agent in self.agents.drain(..) {
             let input = input.to_owned();
+            let request_content = request_content.map(str::to_owned);
             tasks.spawn(async move {
                 let started = Instant::now();
                 let before_input = agent.session_input_tokens;
                 let before_output = agent.session_output_tokens;
-                let result = agent.ask(&input).await;
+                let result = if let Some(content) = request_content.as_deref() {
+                    agent.ask_with_context(&input, Some(content)).await
+                } else {
+                    agent.ask(&input).await
+                };
                 let run = AgentRunResult {
                     agent_id: agent.id,
                     elapsed: started.elapsed(),
