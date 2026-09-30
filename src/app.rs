@@ -662,10 +662,50 @@ pub(crate) async fn run() -> Result<()> {
         }
         let user_question = automatic_input.is_none();
         let mut request_input = automatic_input.unwrap_or(input);
-        let mut rag_chunks = if rag_enabled && user_question {
+        let mut rag_chunks: Option<Vec<RetrievedChunk>> = if rag_enabled && user_question {
             let root = std::env::current_dir()?.canonicalize()?;
-            match retrieve(&root, &request_input).await {
-                Ok(chunks) => Some(chunks),
+            let agent = agents
+                .agents
+                .first()
+                .context("RAG-запросу нужен активный агент")?;
+            eprintln!(
+                "{}",
+                style("RAG: query rewrite, поиск и reranking…").yellow()
+            );
+            match retrieve_enhanced(
+                &root,
+                &request_input,
+                agent.client.clone(),
+                agent.request_client.clone(),
+                agent.settings.clone(),
+                RetrievalConfig::default(),
+            )
+            .await
+            {
+                Ok(RetrievalOutcome::Retrieved(result)) => {
+                    eprintln!(
+                        "{}",
+                        style(format!(
+                            "RAG: кандидатов {}, после порога {}, в контексте {}.",
+                            result.trace.candidates_before_filter,
+                            result.trace.candidates_after_filter,
+                            result.chunks.len()
+                        ))
+                        .dim()
+                    );
+                    Some(result.chunks)
+                }
+                Ok(RetrievalOutcome::NoRelevantContext(trace)) => {
+                    eprintln!(
+                        "{}\n",
+                        style(format!(
+                            "RAG: релевантный контекст не найден — все {} кандидатов ниже порога {:.2}.",
+                            trace.candidates_before_filter, trace.settings.min_similarity
+                        ))
+                        .yellow()
+                    );
+                    continue 'interactive;
+                }
                 Err(error) => {
                     eprintln!("{} {error:#}\n", style("RAG-запрос не выполнен:").red());
                     continue 'interactive;

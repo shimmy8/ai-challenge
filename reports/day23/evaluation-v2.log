@@ -1,0 +1,347 @@
+   Compiling fox-llm v0.1.0 (/Users/shimmy8/study/ai-challenge)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.00s
+     Running `target/debug/fox-llm rag-eval --questions reports/day23/control-questions-v2.json --output reports/day23/comparison-v2.json --candidate-k 20 --final-k 5 --min-similarity 0.40`
+[rag-eval] Старт: вопросов 10, provider OpenAI, model gpt-5.6-sol, candidate_k 20, final_k 5, min_similarity 0.40
+
+[rag-eval] ===== Вопрос 1/10 =====
+[rag-eval][question] Что происходит с новым инструментом после очередного tools/list, когда его начинает объявлять уже зарегистрированный сервер MCP?
+[rag-eval][baseline_rag] Поиск top-5 и generation...
+[rag-eval][baseline_rag][source 1] openspec/specs/mcp-tool-management/spec.md — mcp-tool-management Specification > Requirements > Requirement: Discovered tools are enabled by default > Scenario: Server adds a new tool · similarity 0.6246
+[rag-eval][baseline_rag][source 2] openspec/specs/mcp-tool-management/spec.md — mcp-tool-management Specification > Requirements > Requirement: MCP menu manages servers independently · similarity 0.5578
+[rag-eval][baseline_rag][source 3] openspec/specs/mcp-tool-management/spec.md — mcp-tool-management Specification > Requirements > Requirement: Discovered tools are enabled by default · similarity 0.5481
+[rag-eval][baseline_rag][source 4] openspec/specs/yandex-calendar-events/spec.md — Requirements > Requirement: Calendar tool declares a complete input contract > Scenario: Tool appears in discovery · similarity 0.5436
+[rag-eval][baseline_rag][source 5] openspec/specs/mcp-tool-execution/spec.md — Requirements > Requirement: Enabled MCP tools are available to every supported provider > Scenario: Enabled tool is advertised · similarity 0.5331
+[rag-eval][baseline_rag][agent] После успешного очередного `tools/list` новый инструмент автоматически считается доступным, если его имя отсутствует в denylist этого сервера [3]. При следующем подключении он становится доступен агенту, если пользователь явно его не отключил [1]. В основной запрос передаются его квалифицированное имя, описание, схема и аннотации [5].
+[rag-eval][baseline_rag][metrics] status Answered · facts 100.0% · sources 100.0% · tokens 737 in / 77 out · 4005 ms
+[rag-eval][enhanced_rag] Rewrite, фильтр, reranking и generation...
+[rag-eval][enhanced_rag][source 1] openspec/specs/mcp-tool-management/spec.md — mcp-tool-management Specification > Requirements > Requirement: Discovered tools are enabled by default > Scenario: Server adds a new tool · similarity 0.6246 · rerank 0.4872
+[rag-eval][enhanced_rag][source 2] openspec/specs/mcp-tool-management/spec.md — mcp-tool-management Specification > Requirements > Requirement: MCP menu manages servers independently · similarity 0.6263 · rerank 0.4662
+[rag-eval][enhanced_rag][source 3] openspec/specs/mcp-tool-management/spec.md — mcp-tool-management Specification > Requirements > Requirement: Discovered tools are enabled by default · similarity 0.5882 · rerank 0.4506
+[rag-eval][enhanced_rag][source 4] openspec/specs/yandex-calendar-events/spec.md — Requirements > Requirement: Calendar tool declares a complete input contract > Scenario: Tool appears in discovery · similarity 0.5772 · rerank 0.4374
+[rag-eval][enhanced_rag][source 5] openspec/specs/mcp-tool-management/spec.md — mcp-tool-management Specification > Requirements > Requirement: MCP configuration stores named servers · similarity 0.5613 · rerank 0.4207
+[rag-eval][enhanced_rag][agent] После успешного очередного `tools/list` новый инструмент автоматически считается доступным и включённым, если его имя не находится в denylist этого сервера [3]. Агент сможет использовать его при следующем подключении, если пользователь явно не отключил инструмент [1].
+[rag-eval][enhanced_rag][metrics] status Answered · facts 100.0% · sources 100.0% · tokens 898 in / 79 out · 6002 ms
+[rag-eval] Вопрос 1/10 завершён
+
+[rag-eval] ===== Вопрос 2/10 =====
+[rag-eval][question] Какие четыре исхода может вернуть отдельная проверка глобальных инвариантов и при каких исходах черновик ответа разрешено принять?
+[rag-eval][baseline_rag] Поиск top-5 и generation...
+[rag-eval][baseline_rag][source 1] openspec/specs/global-invariants/spec.md — Global Invariants Specification > Requirements > Requirement: Ответ проверяется отдельно до выдачи и сохранения · similarity 0.5195
+[rag-eval][baseline_rag][source 2] openspec/specs/global-invariants/spec.md — Global Invariants Specification > Requirements > Requirement: Ответ проверяется отдельно до выдачи и сохранения > Scenario: Проверяющая модель не может вынести вердикт · similarity 0.4810
+[rag-eval][baseline_rag][source 3] reports/day14/global-invariants.md — День 14: глобальные инварианты > Совместимый запрос · similarity 0.4558
+[rag-eval][baseline_rag][source 4] reports/day14/global-invariants.md — День 14: глобальные инварианты > Полный сценарий ручной проверки · similarity 0.4490
+[rag-eval][baseline_rag][source 5] reports/day10/report.md — День 10 — Sliding Window, Sticky Facts и Branching > Сессия 16 — Sliding Window, окно 10 сообщений > Стабильность и сохранение деталей · similarity 0.4483
+[rag-eval][baseline_rag][agent] Отдельная проверка глобальных инвариантов может вернуть четыре исхода:
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] - `allow`
+[rag-eval][baseline_rag][agent] - `compliant_refusal`
+[rag-eval][baseline_rag][agent] - `violation`
+[rag-eval][baseline_rag][agent] - `uncertain`
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] Черновик ответа разрешено принять только при исходах `allow` или `compliant_refusal` [1]. При `violation` нарушающий черновик не принимается, а при `uncertain` его нельзя показывать, сохранять или применять связанное изменение задачи [1][2].
+[rag-eval][baseline_rag][metrics] status Answered · facts 100.0% · sources 100.0% · tokens 1107 in / 104 out · 3649 ms
+[rag-eval][enhanced_rag] Rewrite, фильтр, reranking и generation...
+[rag-eval][enhanced_rag][source 1] openspec/specs/global-invariants/spec.md — Global Invariants Specification > Requirements > Requirement: Ответ проверяется отдельно до выдачи и сохранения · similarity 0.5360 · rerank 0.4458
+[rag-eval][enhanced_rag][source 2] openspec/specs/global-invariants/spec.md — Global Invariants Specification > Requirements > Requirement: Ответ проверяется отдельно до выдачи и сохранения > Scenario: Проверяющая модель не может вынести вердикт · similarity 0.4814 · rerank 0.3899
+[rag-eval][enhanced_rag][source 3] openspec/specs/global-invariants/spec.md — Global Invariants Specification > Requirements > Requirement: Ответ проверяется отдельно до выдачи и сохранения > Scenario: Проверка недоступна или неоднозначна · similarity 0.4679 · rerank 0.3805
+[rag-eval][enhanced_rag][source 4] openspec/specs/global-invariants/spec.md — Global Invariants Specification > Requirements > Requirement: Ответ проверяется отдельно до выдачи и сохранения > Scenario: Нет активных инвариантов · similarity 0.4514 · rerank 0.3572
+[rag-eval][enhanced_rag][source 5] reports/day14/global-invariants.md — День 14: глобальные инварианты > Совместимый запрос · similarity 0.4557 · rerank 0.3425
+[rag-eval][enhanced_rag][agent] Отдельная проверка может вернуть четыре исхода:
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] 1. `allow` — ответ разрешён.
+[rag-eval][enhanced_rag][agent] 2. `compliant_refusal` — корректный отказ, соблюдающий инварианты.
+[rag-eval][enhanced_rag][agent] 3. `violation` — нарушение инварианта.
+[rag-eval][enhanced_rag][agent] 4. `uncertain` — проверка не смогла вынести определённый вердикт [1].
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] Черновик разрешено принять **только** при исходах `allow` или `compliant_refusal` [1]. При `violation` нарушающий черновик не принимается, а при `uncertain` он не показывается, не сохраняется и связанное изменение задачи не применяется [1][2].
+[rag-eval][enhanced_rag][metrics] status Answered · facts 100.0% · sources 100.0% · tokens 1203 in / 175 out · 5785 ms
+[rag-eval] Вопрос 2/10 завершён
+
+[rag-eval] ===== Вопрос 3/10 =====
+[rag-eval][question] Какие данные и возможности запрещено передавать модельному запросу инструмента ai.generate_text кроме его инструкций и входа текущего вызова, включая инструменты MCP?
+[rag-eval][baseline_rag] Поиск top-5 и generation...
+[rag-eval][baseline_rag][source 1] openspec/specs/isolated-ai-processing/spec.md — isolated-ai-processing Specification > Requirements > Requirement: AI processing has isolated context and no tools · similarity 0.6928
+[rag-eval][baseline_rag][source 2] openspec/specs/isolated-ai-processing/spec.md — isolated-ai-processing Specification > Requirements > Requirement: AI processing is exposed as a bounded MCP tool · similarity 0.6862
+[rag-eval][baseline_rag][source 3] openspec/specs/mcp-tool-execution/spec.md — Requirements > Requirement: Structured tool calls are executed and returned to the model > Scenario: Plain text cannot invoke a tool · similarity 0.5876
+[rag-eval][baseline_rag][source 4] openspec/specs/mcp-tool-execution/spec.md — Requirements > Requirement: Enabled MCP tools are available to every supported provider · similarity 0.5461
+[rag-eval][baseline_rag][source 5] openspec/specs/mcp-tool-execution/spec.md — Requirements > Requirement: Structured tool calls are executed and returned to the model · similarity 0.5291
+[rag-eval][baseline_rag][agent] Модельному запросу `ai.generate_text` запрещено передавать:
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] - интерактивную историю диалога;
+[rag-eval][baseline_rag][agent] - профиль пользователя;
+[rag-eval][baseline_rag][agent] - долговременную память;
+[rag-eval][baseline_rag][agent] - активную задачу;
+[rag-eval][baseline_rag][agent] - любые MCP-инструменты, включая их определения;
+[rag-eval][baseline_rag][agent] - право выполнять внешние действия [1].
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] Запрос должен содержать **только**:
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] - фиксированные системные ограничения;
+[rag-eval][baseline_rag][agent] - явно переданные инструкции;
+[rag-eval][baseline_rag][agent] - вход текущего вызова [1].
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] Сам `ai.generate_text` является ограниченным read-only MCP-инструментом: он принимает инструкции и JSON-совместимый вход и возвращает текст с безопасной информацией об использованной модели [2]. Общие правила предоставления MCP-инструментов провайдерам [4] не отменяют специального требования изоляции для этого модельного запроса.
+[rag-eval][baseline_rag][metrics] status Answered · facts 100.0% · sources 100.0% · tokens 888 in / 173 out · 4909 ms
+[rag-eval][enhanced_rag] Rewrite, фильтр, reranking и generation...
+[rag-eval][enhanced_rag][source 1] openspec/specs/isolated-ai-processing/spec.md — isolated-ai-processing Specification > Requirements > Requirement: AI processing has isolated context and no tools · similarity 0.6928 · rerank 0.5203
+[rag-eval][enhanced_rag][source 2] openspec/specs/isolated-ai-processing/spec.md — isolated-ai-processing Specification > Requirements > Requirement: AI processing is exposed as a bounded MCP tool · similarity 0.6862 · rerank 0.5098
+[rag-eval][enhanced_rag][source 3] openspec/specs/mcp-tool-execution/spec.md — Requirements > Requirement: Enabled MCP tools are available to every supported provider · similarity 0.5461 · rerank 0.4352
+[rag-eval][enhanced_rag][source 4] openspec/specs/mcp-tool-execution/spec.md — Requirements > Requirement: Structured tool calls are executed and returned to the model > Scenario: Plain text cannot invoke a tool · similarity 0.5876 · rerank 0.4231
+[rag-eval][enhanced_rag][source 5] openspec/specs/mcp-tool-execution/spec.md — Requirements > Requirement: Structured tool calls are executed and returned to the model · similarity 0.5291 · rerank 0.4056
+[rag-eval][enhanced_rag][agent] Модельному запросу `ai.generate_text` запрещено передавать:
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] - интерактивную историю диалога;
+[rag-eval][enhanced_rag][agent] - профиль пользователя;
+[rag-eval][enhanced_rag][agent] - долговременную память;
+[rag-eval][enhanced_rag][agent] - активную задачу;
+[rag-eval][enhanced_rag][agent] - любые MCP-инструменты;
+[rag-eval][enhanced_rag][agent] - право выполнять внешние действия.
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] Запрос должен содержать **только** фиксированные системные ограничения, явно переданные инструкции и вход текущего вызова [1]. Сам `generate_text` является ограниченным read-only MCP-инструментом, принимающим инструкции и JSON-совместимый вход [2].
+[rag-eval][enhanced_rag][metrics] status Answered · facts 100.0% · sources 100.0% · tokens 1054 in / 152 out · 4723 ms
+[rag-eval] Вопрос 3/10 завершён
+
+[rag-eval] ===== Вопрос 4/10 =====
+[rag-eval][question] Какие данные обязаны содержать логи жизненного цикла локального вызова MCP и какие данные полезной нагрузки они по умолчанию раскрывать не должны?
+[rag-eval][baseline_rag] Поиск top-5 и generation...
+[rag-eval][baseline_rag][source 1] openspec/specs/mcp-call-observability/spec.md — mcp-call-observability Specification > Requirements > Requirement: Every server MCP call emits correlated lifecycle logs · similarity 0.6387
+[rag-eval][baseline_rag][source 2] openspec/specs/mcp-call-observability/spec.md — mcp-call-observability Specification > Requirements > Requirement: Logs exclude payloads and credentials by default · similarity 0.5901
+[rag-eval][baseline_rag][source 3] openspec/specs/mcp-call-observability/spec.md — mcp-call-observability Specification > Purpose · similarity 0.4811
+[rag-eval][baseline_rag][source 4] openspec/specs/mcp-tool-execution/spec.md — Requirements > Requirement: Tool execution is constrained and fail-closed > Scenario: MCP call fails · similarity 0.4755
+[rag-eval][baseline_rag][source 5] openspec/specs/scheduled-background-jobs/spec.md — scheduled-background-jobs Specification > Purpose · similarity 0.4738
+[rag-eval][baseline_rag][agent] Логи жизненного цикла каждого локального MCP-вызова должны содержать однострочные записи о **начале** и **завершении** вызова в stdout отдельного серверного процесса. Обязательные поля:
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] - correlation ID;
+[rag-eval][baseline_rag][agent] - server ID;
+[rag-eval][baseline_rag][agent] - нативное имя инструмента;
+[rag-eval][baseline_rag][agent] - идентификатор шага — если он существует;
+[rag-eval][baseline_rag][agent] - статус;
+[rag-eval][baseline_rag][agent] - длительность завершённого вызова. [1]
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] По умолчанию логи **не должны раскрывать**:
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] - полные аргументы вызова;
+[rag-eval][baseline_rag][agent] - полные результаты;
+[rag-eval][baseline_rag][agent] - заголовки `Authorization`;
+[rag-eval][baseline_rag][agent] - API-ключи;
+[rag-eval][baseline_rag][agent] - учётные данные CalDAV;
+[rag-eval][baseline_rag][agent] - токен Telegram;
+[rag-eval][baseline_rag][agent] - Telegram chat ID. [2]
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] Для безопасной корреляции разрешено журналировать идентификаторы сервера, инструмента, задания (`job`), запуска (`run`) и шага (`step`) [2]. Эти диагностические записи не должны дублироваться в пользовательском ответе интерактивного клиента [1].
+[rag-eval][baseline_rag][metrics] status Answered · facts 100.0% · sources 100.0% · tokens 795 in / 214 out · 4588 ms
+[rag-eval][enhanced_rag] Rewrite, фильтр, reranking и generation...
+[rag-eval][enhanced_rag][source 1] openspec/specs/mcp-call-observability/spec.md — mcp-call-observability Specification > Requirements > Requirement: Every server MCP call emits correlated lifecycle logs · similarity 0.6388 · rerank 0.4749
+[rag-eval][enhanced_rag][source 2] openspec/specs/mcp-call-observability/spec.md — mcp-call-observability Specification > Requirements > Requirement: Logs exclude payloads and credentials by default · similarity 0.6123 · rerank 0.4509
+[rag-eval][enhanced_rag][source 3] openspec/specs/mcp-tool-management/spec.md — mcp-tool-management Specification > Requirements > Requirement: MCP configuration stores named servers · similarity 0.4960 · rerank 0.3749
+[rag-eval][enhanced_rag][source 4] openspec/specs/mcp-tool-execution/spec.md — Requirements > Requirement: Tool execution is constrained and fail-closed > Scenario: MCP call fails · similarity 0.4870 · rerank 0.3576
+[rag-eval][enhanced_rag][source 5] openspec/specs/mcp-call-observability/spec.md — mcp-call-observability Specification > Purpose · similarity 0.4812 · rerank 0.3368
+[rag-eval][enhanced_rag][agent] Логи жизненного цикла каждого локального MCP-вызова должны:
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] - выводиться в `stdout` отдельного процесса сервера;
+[rag-eval][enhanced_rag][agent] - быть однострочными записями начала и завершения вызова;
+[rag-eval][enhanced_rag][agent] - содержать:
+[rag-eval][enhanced_rag][agent]   - correlation ID;
+[rag-eval][enhanced_rag][agent]   - server ID;
+[rag-eval][enhanced_rag][agent]   - нативное имя инструмента;
+[rag-eval][enhanced_rag][agent]   - идентификатор шага, если он имеется;
+[rag-eval][enhanced_rag][agent]   - статус;
+[rag-eval][enhanced_rag][agent]   - длительность завершённого вызова [1].
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] Эти диагностические записи не должны дублироваться в пользовательском ответе агента [1].
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] По умолчанию логи не должны раскрывать:
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] - полные аргументы вызова;
+[rag-eval][enhanced_rag][agent] - результаты;
+[rag-eval][enhanced_rag][agent] - заголовки `Authorization`;
+[rag-eval][enhanced_rag][agent] - API-ключи;
+[rag-eval][enhanced_rag][agent] - учётные данные CalDAV;
+[rag-eval][enhanced_rag][agent] - токен Telegram;
+[rag-eval][enhanced_rag][agent] - Telegram chat ID [2].
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] Для корреляции допустимо журналировать безопасные идентификаторы сервера, инструмента, задания (`job`), запуска (`run`) и шага (`step`) [2].
+[rag-eval][enhanced_rag][metrics] status Answered · facts 100.0% · sources 100.0% · tokens 1005 in / 248 out · 7558 ms
+[rag-eval] Вопрос 4/10 завершён
+
+[rag-eval] ===== Вопрос 5/10 =====
+[rag-eval][question] Как должен завершиться pipeline при ошибке промежуточного шага и выполняется ли автоматический rollback уже совершённых действий?
+[rag-eval][baseline_rag] Поиск top-5 и generation...
+[rag-eval][baseline_rag][source 1] openspec/specs/mcp-pipeline-execution/spec.md — mcp-pipeline-execution Specification > Requirements > Requirement: Pipeline execution is sequential and fail-closed · similarity 0.6814
+[rag-eval][baseline_rag][source 2] openspec/specs/mcp-pipeline-execution/spec.md — mcp-pipeline-execution Specification > Requirements > Requirement: Pipeline execution is sequential and fail-closed > Scenario: Failure follows a completed write · similarity 0.5458
+[rag-eval][baseline_rag][source 3] openspec/specs/mcp-pipeline-execution/spec.md — mcp-pipeline-execution Specification > Requirements > Requirement: Pipeline is validated before execution > Scenario: Pipeline exceeds the step limit · similarity 0.5225
+[rag-eval][baseline_rag][source 4] openspec/specs/mcp-pipeline-execution/spec.md — mcp-pipeline-execution Specification > Requirements > Requirement: Every state-changing step preserves approval and invariants > Scenario: Resolved step violates an invariant · similarity 0.5224
+[rag-eval][baseline_rag][source 5] openspec/specs/scheduled-pipeline-jobs/spec.md — scheduled-pipeline-jobs Specification > Requirements > Requirement: Jobs fail closed when their environment changes > Scenario: Tool was disabled after approval · similarity 0.5155
+[rag-eval][baseline_rag][agent] Pipeline должен выполняться последовательно и завершиться сразу после первой ошибки промежуточного шага. Все последующие шаги помечаются как `skipped` [1].
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] Автоматический rollback уже выполненных действий **не производится**. Итоговый результат должен явно перечислить:
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] - успешно совершённые внешние действия;
+[rag-eval][baseline_rag][agent] - шаг и причину ошибки;
+[rag-eval][baseline_rag][agent] - пропущенные последующие шаги.
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] Если до ошибки был выполнен изменяющий состояние шаг, система должна сообщить, что действие состоялось, и не заявлять об откате [1][2].
+[rag-eval][baseline_rag][metrics] status Answered · facts 66.7% · sources 100.0% · tokens 826 in / 121 out · 5714 ms
+[rag-eval][enhanced_rag] Rewrite, фильтр, reranking и generation...
+[rag-eval][enhanced_rag][source 1] openspec/specs/mcp-pipeline-execution/spec.md — mcp-pipeline-execution Specification > Requirements > Requirement: Pipeline execution is sequential and fail-closed · similarity 0.6814 · rerank 0.5413
+[rag-eval][enhanced_rag][source 2] openspec/specs/mcp-pipeline-execution/spec.md — mcp-pipeline-execution Specification > Requirements > Requirement: Pipeline execution is sequential and fail-closed > Scenario: Failure follows a completed write · similarity 0.5458 · rerank 0.4178
+[rag-eval][enhanced_rag][source 3] openspec/specs/mcp-pipeline-execution/spec.md — mcp-pipeline-execution Specification > Requirements > Requirement: Pipeline is validated before execution · similarity 0.4787 · rerank 0.3994
+[rag-eval][enhanced_rag][source 4] openspec/specs/mcp-tool-execution/spec.md — Requirements > Requirement: Tool execution is constrained and fail-closed > Scenario: Pipeline step limit is reached · similarity 0.5067 · rerank 0.3904
+[rag-eval][enhanced_rag][source 5] openspec/specs/mcp-pipeline-execution/spec.md — mcp-pipeline-execution Specification > Requirements > Requirement: Pipeline is validated before execution > Scenario: Pipeline exceeds the step limit · similarity 0.5226 · rerank 0.3872
+[rag-eval][enhanced_rag][agent] Pipeline должен выполняться последовательно и при первой ошибке промежуточного шага немедленно завершиться с ошибкой. Все последующие шаги отмечаются как `skipped` [1].
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] Автоматический rollback **не выполняется**. Уже совершённые внешние действия сохраняются и должны быть явно перечислены в итоговом результате вместе с информацией о последующей ошибке — без утверждений, что изменения были отменены [1][2].
+[rag-eval][enhanced_rag][metrics] status Answered · facts 66.7% · sources 100.0% · tokens 988 in / 119 out · 5748 ms
+[rag-eval] Вопрос 5/10 завершён
+
+[rag-eval] ===== Вопрос 6/10 =====
+[rag-eval][question] Нужно ли заново подтверждать сохранённое задание orchestrator, если меняется его расписание, шаг, инструмент или аргумент?
+[rag-eval][baseline_rag] Поиск top-5 и generation...
+[rag-eval][baseline_rag][source 1] openspec/specs/task-lifecycle/spec.md — Task Lifecycle Specification > Requirements > Requirement: Переход между фазами контролирует пользователь > Scenario: Условия изменились после показа подтверждения · similarity 0.6013
+[rag-eval][baseline_rag][source 2] openspec/specs/scheduled-pipeline-jobs/spec.md — scheduled-pipeline-jobs Specification > Requirements > Requirement: Job creation authorizes an immutable future action > Scenario: Job definition changes · similarity 0.5689
+[rag-eval][baseline_rag][source 3] openspec/specs/mcp-pipeline-execution/spec.md — mcp-pipeline-execution Specification > Requirements > Requirement: Every state-changing step preserves approval and invariants · similarity 0.5627
+[rag-eval][baseline_rag][source 4] openspec/specs/scheduled-pipeline-jobs/spec.md — scheduled-pipeline-jobs Specification > Requirements > Requirement: Job creation authorizes an immutable future action · similarity 0.5578
+[rag-eval][baseline_rag][source 5] openspec/specs/task-lifecycle/spec.md — Task Lifecycle Specification > Requirements > Requirement: Агент автоматически сохраняет прогресс TODO · similarity 0.5538
+[rag-eval][baseline_rag][agent] Да. Любое изменение **расписания, шага, инструмента или аргумента** сохранённого задания orchestrator требует нового предварительного просмотра и явного подтверждения [4].
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] До повторного подтверждения существующее задание изменять нельзя [2], а фоновый запуск может выполнять только ранее показанную и подтверждённую неизменяемую структуру pipeline [3].
+[rag-eval][baseline_rag][metrics] status Answered · facts 100.0% · sources 100.0% · tokens 872 in / 86 out · 3479 ms
+[rag-eval][enhanced_rag] Rewrite, фильтр, reranking и generation...
+[rag-eval][enhanced_rag][source 1] openspec/specs/scheduled-pipeline-jobs/spec.md — scheduled-pipeline-jobs Specification > Requirements > Requirement: Job creation authorizes an immutable future action · similarity 0.5578 · rerank 0.4476
+[rag-eval][enhanced_rag][source 2] openspec/specs/mcp-pipeline-execution/spec.md — mcp-pipeline-execution Specification > Requirements > Requirement: Every state-changing step preserves approval and invariants · similarity 0.5627 · rerank 0.4415
+[rag-eval][enhanced_rag][source 3] openspec/specs/task-lifecycle/spec.md — Task Lifecycle Specification > Requirements > Requirement: Переход между фазами контролирует пользователь > Scenario: Условия изменились после показа подтверждения · similarity 0.6013 · rerank 0.4209
+[rag-eval][enhanced_rag][source 4] openspec/specs/scheduled-pipeline-jobs/spec.md — scheduled-pipeline-jobs Specification > Requirements > Requirement: Job creation authorizes an immutable future action > Scenario: Job definition changes · similarity 0.5689 · rerank 0.4173
+[rag-eval][enhanced_rag][source 5] openspec/specs/scheduled-pipeline-jobs/spec.md — scheduled-pipeline-jobs Specification > Requirements > Requirement: A scheduled job contains a generic pipeline > Scenario: A nested orchestration call is proposed · similarity 0.5425 · rerank 0.4083
+[rag-eval][enhanced_rag][agent] Да. Любое изменение сохранённого задания — **расписания, шага, инструмента или аргумента** — требует нового предварительного просмотра и явного подтверждения. Первоначальное подтверждение разрешает будущие запуски только неизменяемой версии pipeline [1][4].
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] До повторного подтверждения изменённое задание не должно использоваться для следующего запуска [2].
+[rag-eval][enhanced_rag][metrics] status Answered · facts 100.0% · sources 100.0% · tokens 1015 in / 115 out · 5895 ms
+[rag-eval] Вопрос 6/10 завершён
+
+[rag-eval] ===== Вопрос 7/10 =====
+[rag-eval][question] Какие аргументы принимает telegram.send_message и откуда должны браться Bot token и chat ID?
+[rag-eval][baseline_rag] Поиск top-5 и generation...
+[rag-eval][baseline_rag][source 1] openspec/specs/telegram-digest-delivery/spec.md — telegram-digest-delivery Specification > Requirements > Requirement: Telegram destination is fixed by local configuration · similarity 0.6057
+[rag-eval][baseline_rag][source 2] openspec/specs/telegram-message-delivery/spec.md — telegram-message-delivery Specification > Requirements > Requirement: Telegram server exposes a fixed-destination sink · similarity 0.5848
+[rag-eval][baseline_rag][source 3] openspec/specs/telegram-digest-delivery/spec.md — telegram-digest-delivery Specification > Requirements > Requirement: Telegram destination is fixed by local configuration > Scenario: Telegram is configured · similarity 0.5748
+[rag-eval][baseline_rag][source 4] openspec/specs/telegram-message-delivery/spec.md — telegram-message-delivery Specification > Requirements > Requirement: Telegram secrets never leave the server boundary · similarity 0.5374
+[rag-eval][baseline_rag][source 5] openspec/specs/telegram-digest-delivery/spec.md — telegram-digest-delivery Specification > Requirements > Requirement: Telegram destination is fixed by local configuration > Scenario: Model proposes another recipient · similarity 0.5258
+[rag-eval][baseline_rag][agent] `telegram.send_message` принимает **только один аргумент — непустой текст сообщения**, длина которого должна укладываться в установленный лимит [2].
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] **Bot token** и **chat ID** не передаются в аргументах инструмента. Они должны поступать исключительно из **локальной конфигурации MCP-сервера Telegram** [1][2]. Эти реквизиты не должны передаваться модели или клиенту, сохраняться в заданиях и результатах либо попадать в логи и сообщения об ошибках [1][4].
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] Если локальная конфигурация отсутствует или неполна, сервер должен вернуть безопасную ошибку до выполнения сетевого запроса [4].
+[rag-eval][baseline_rag][metrics] status Answered · facts 100.0% · sources 100.0% · tokens 794 in / 148 out · 5292 ms
+[rag-eval][enhanced_rag] Rewrite, фильтр, reranking и generation...
+[rag-eval][enhanced_rag][source 1] openspec/specs/telegram-message-delivery/spec.md — telegram-message-delivery Specification > Requirements > Requirement: Telegram server exposes a fixed-destination sink · similarity 0.5848 · rerank 0.5177
+[rag-eval][enhanced_rag][source 2] openspec/specs/telegram-digest-delivery/spec.md — telegram-digest-delivery Specification > Requirements > Requirement: Telegram destination is fixed by local configuration · similarity 0.6056 · rerank 0.5156
+[rag-eval][enhanced_rag][source 3] openspec/specs/telegram-digest-delivery/spec.md — telegram-digest-delivery Specification > Requirements > Requirement: Telegram destination is fixed by local configuration > Scenario: Telegram is configured · similarity 0.5747 · rerank 0.4773
+[rag-eval][enhanced_rag][source 4] openspec/specs/telegram-message-delivery/spec.md — telegram-message-delivery Specification > Requirements > Requirement: Telegram secrets never leave the server boundary · similarity 0.5374 · rerank 0.4345
+[rag-eval][enhanced_rag][source 5] openspec/specs/telegram-digest-delivery/spec.md — telegram-digest-delivery Specification > Requirements > Requirement: Telegram destination is fixed by local configuration > Scenario: Model proposes another recipient · similarity 0.5258 · rerank 0.3930
+[rag-eval][enhanced_rag][agent] `telegram.send_message` принимает только один аргумент — **непустой текст сообщения**, размер которого не превышает установленный лимит [1].
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] **Bot token** и **chat ID**:
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] - не передаются аргументами инструмента;
+[rag-eval][enhanced_rag][agent] - берутся только из локальной конфигурации Telegram/MCP-сервера [1][2];
+[rag-eval][enhanced_rag][agent] - не должны передаваться модели, сохраняться в заданиях, возвращаться клиенту или попадать в логи и ошибки [2][4].
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] Получатель фиксирован локальными настройками сервера. Даже если в тексте указать другой chat ID, имя пользователя или URL, они будут восприняты как обычный текст и не изменят адресата [5].
+[rag-eval][enhanced_rag][metrics] status Answered · facts 100.0% · sources 100.0% · tokens 912 in / 170 out · 5840 ms
+[rag-eval] Вопрос 7/10 завершён
+
+[rag-eval] ===== Вопрос 8/10 =====
+[rag-eval][question] По какому ключу индексатор переиспользует embeddings и что остаётся доступным, если повторная индексация завершается ошибкой?
+[rag-eval][baseline_rag] Поиск top-5 и generation...
+[rag-eval][baseline_rag][source 1] openspec/specs/document-indexing/spec.md — document-indexing Specification > Requirements > Requirement: SQLite-индекс сохраняет данные атомарно и переиспользует embeddings > Scenario: Повторная индексация неизменного корпуса · similarity 0.5812
+[rag-eval][baseline_rag][source 2] openspec/specs/document-indexing/spec.md — document-indexing Specification > Requirements > Requirement: SQLite-индекс сохраняет данные атомарно и переиспользует embeddings > Scenario: Изменился один документ · similarity 0.5516
+[rag-eval][baseline_rag][source 3] openspec/specs/document-indexing/spec.md — document-indexing Specification > Requirements > Requirement: Команда сообщает безопасный прогресс индексации > Scenario: Embedding endpoint не отвечает · similarity 0.5218
+[rag-eval][baseline_rag][source 4] openspec/specs/document-indexing/spec.md — document-indexing Specification > Requirements > Requirement: Embeddings создаются пакетно через выбранный adapter > Scenario: Обязательные credentials отсутствуют · similarity 0.5051
+[rag-eval][baseline_rag][source 5] openspec/specs/document-indexing/spec.md — document-indexing Specification > Requirements > Requirement: SQLite-индекс сохраняет данные атомарно и переиспользует embeddings > Scenario: Сбой не уничтожает предыдущий индекс · similarity 0.4957
+[rag-eval][baseline_rag][agent] Индексатор переиспользует embeddings **по хешу чанка**, если вектор совместим с текущей конфигурацией. Новые embeddings запрашиваются только для новых хешей [1][2].
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] Если повторная индексация завершается ошибкой на этапе чтения, chunking, создания embeddings или записи, доступным остаётся **последний успешно опубликованный набор чанков для каждой стратегии** — без частичной замены [5]. В частности, тайм-аут или отсутствие credentials не повреждают предыдущий опубликованный индекс [3][4].
+[rag-eval][baseline_rag][metrics] status Answered · facts 50.0% · sources 100.0% · tokens 818 in / 122 out · 3965 ms
+[rag-eval][enhanced_rag] Rewrite, фильтр, reranking и generation...
+[rag-eval][enhanced_rag][source 1] openspec/specs/document-indexing/spec.md — document-indexing Specification > Requirements > Requirement: SQLite-индекс сохраняет данные атомарно и переиспользует embeddings > Scenario: Повторная индексация неизменного корпуса · similarity 0.5865 · rerank 0.4694
+[rag-eval][enhanced_rag][source 2] openspec/specs/document-indexing/spec.md — document-indexing Specification > Requirements > Requirement: SQLite-индекс сохраняет данные атомарно и переиспользует embeddings > Scenario: Изменился один документ · similarity 0.5517 · rerank 0.4450
+[rag-eval][enhanced_rag][source 3] openspec/specs/document-indexing/spec.md — document-indexing Specification > Requirements > Requirement: Команда сообщает безопасный прогресс индексации > Scenario: Embedding endpoint не отвечает · similarity 0.5511 · rerank 0.4387
+[rag-eval][enhanced_rag][source 4] openspec/specs/document-indexing/spec.md — document-indexing Specification > Requirements > Requirement: Embeddings создаются пакетно через выбранный adapter > Scenario: Обязательные credentials отсутствуют · similarity 0.5056 · rerank 0.4069
+[rag-eval][enhanced_rag][source 5] openspec/specs/document-indexing/spec.md — document-indexing Specification > Requirements > Requirement: SQLite-индекс сохраняет данные атомарно и переиспользует embeddings > Scenario: Сбой не уничтожает предыдущий индекс · similarity 0.4958 · rerank 0.4059
+[rag-eval][enhanced_rag][agent] Индексатор переиспользует embeddings **по хешу чанка**, если в индексе уже есть совместимый вектор; новые embeddings запрашиваются только для новых хешей [1][2].
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] Если повторная индексация завершается ошибкой на этапе чтения, chunking, создания embeddings или записи, доступным остаётся **последний успешно опубликованный набор чанков для каждой стратегии** — без частичной замены [5]. То есть ранее опубликованный индекс продолжает работать, в том числе при timeout провайдера или отсутствии credentials [3][4].
+[rag-eval][enhanced_rag][metrics] status Answered · facts 50.0% · sources 100.0% · tokens 956 in / 147 out · 5468 ms
+[rag-eval] Вопрос 8/10 завершён
+
+[rag-eval] ===== Вопрос 9/10 =====
+[rag-eval][question] Как рассчитывается отчёт GitHub, если необязательный источник данных, например workflow runs, недоступен?
+[rag-eval][baseline_rag] Поиск top-5 и generation...
+[rag-eval][baseline_rag][source 1] reports/day19/README.md — День 19. Композиция MCP-инструментов > Ограничения · similarity 0.6009
+[rag-eval][baseline_rag][source 2] reports/day19/README.md — День 19. Композиция MCP-инструментов > Доступные GitHub-метрики · similarity 0.5949
+[rag-eval][baseline_rag][source 3] openspec/specs/github-project-reporting/spec.md — github-project-reporting Specification > Requirements > Requirement: GitHub report is rendered from structured metrics · similarity 0.5356
+[rag-eval][baseline_rag][source 4] openspec/specs/github-project-reporting/spec.md — github-project-reporting Specification > Requirements > Requirement: GitHub and reporting responsibilities are isolated · similarity 0.5327
+[rag-eval][baseline_rag][source 5] openspec/specs/github-project-reporting/spec.md — github-project-reporting Specification > Requirements > Requirement: Public project activity is collected for a bounded period > Scenario: Activity is collected · similarity 0.5301
+[rag-eval][baseline_rag][agent] Если необязательный источник данных — например, GitHub Actions workflow runs — недоступен, отчёт всё равно формируется по остальным доступным данным.
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] При этом:
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] - метрики, зависящие от отсутствующего источника, например **CI success rate**, не рассчитываются и показываются как `unavailable`;
+[rag-eval][baseline_rag][agent] - в разделе **Data coverage** источник получает отдельный статус недоступности;
+[rag-eval][baseline_rag][agent] - в разделе **Warnings** добавляется соответствующее предупреждение;
+[rag-eval][baseline_rag][agent] - доступные исходные счётчики и производные показатели продолжают выводиться, причём отчёт различает полученные, рассчитанные, усечённые и недоступные данные [2][3].
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] Расчёт и Markdown-рендеринг выполняются детерминированно по уже собранным структурированным данным; модуль reporting сам не делает повторных сетевых запросов к GitHub [2][4]. Точная формула поведения отдельных составных метрик при частично доступных workflow runs в предоставленных фрагментах не описана.
+[rag-eval][baseline_rag][metrics] status Answered · facts 75.0% · sources 100.0% · tokens 1259 in / 216 out · 4813 ms
+[rag-eval][enhanced_rag] Rewrite, фильтр, reranking и generation...
+[rag-eval][enhanced_rag][source 1] reports/day19/README.md — День 19. Композиция MCP-инструментов > Доступные GitHub-метрики · similarity 0.5950 · rerank 0.5098
+[rag-eval][enhanced_rag][source 2] reports/day19/README.md — День 19. Композиция MCP-инструментов > Ограничения · similarity 0.6010 · rerank 0.4607
+[rag-eval][enhanced_rag][source 3] openspec/specs/github-project-reporting/spec.md — github-project-reporting Specification > Requirements > Requirement: Derived metrics are deterministic and transparent > Scenario: Optional source is unavailable · similarity 0.5736 · rerank 0.4548
+[rag-eval][enhanced_rag][source 4] openspec/specs/github-project-reporting/spec.md — github-project-reporting Specification > Requirements > Requirement: Public project activity is collected for a bounded period · similarity 0.4970 · rerank 0.4146
+[rag-eval][enhanced_rag][source 5] openspec/specs/github-project-reporting/spec.md — github-project-reporting Specification > Requirements > Requirement: GitHub report is rendered from structured metrics · similarity 0.5357 · rerank 0.4084
+[rag-eval][enhanced_rag][agent] Если необязательный источник, например **workflow runs**, недоступен, отчёт всё равно формируется:
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] - связанные с ним показатели, например **CI success rate**, получают значение `unavailable`;
+[rag-eval][enhanced_rag][agent] - отсутствующие данные **не подменяются нулём**;
+[rag-eval][enhanced_rag][agent] - в отчёт добавляется явное предупреждение;
+[rag-eval][enhanced_rag][agent] - статус источника отражается отдельно в разделе **Data coverage**;
+[rag-eval][enhanced_rag][agent] - остальные доступные метрики продолжают рассчитываться детерминированно [1][3][4].
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] Markdown-отчёт при этом различает полученные, рассчитанные, усечённые и недоступные данные, а исходные счётчики показывает рядом с производными показателями [5].
+[rag-eval][enhanced_rag][metrics] status Answered · facts 100.0% · sources 100.0% · tokens 1480 in / 168 out · 5332 ms
+[rag-eval] Вопрос 9/10 завершён
+
+[rag-eval] ===== Вопрос 10/10 =====
+[rag-eval][question] Можно ли читать и объединять события, если CalDAV обнаружил несколько доступных календарей, а целевой календарь явно не выбран?
+[rag-eval][baseline_rag] Поиск top-5 и generation...
+[rag-eval][baseline_rag][source 1] openspec/specs/yandex-calendar-events/spec.md — Requirements > Requirement: Calendar target is selected without guessing · similarity 0.7009
+[rag-eval][baseline_rag][source 2] openspec/specs/yandex-calendar-events/spec.md — Requirements > Requirement: Digest reads use the explicitly selected calendar > Scenario: One calendar is available · similarity 0.6984
+[rag-eval][baseline_rag][source 3] openspec/specs/yandex-calendar-events/spec.md — Requirements > Requirement: Digest reads use the explicitly selected calendar · similarity 0.6888
+[rag-eval][baseline_rag][source 4] openspec/specs/yandex-calendar-events/spec.md — Requirements > Requirement: Digest reads use the explicitly selected calendar > Scenario: Several calendars are ambiguous · similarity 0.6131
+[rag-eval][baseline_rag][source 5] openspec/specs/yandex-calendar-events/spec.md — Requirements > Requirement: Calendar target is selected without guessing > Scenario: Several writable calendars exist without selection · similarity 0.5982
+[rag-eval][baseline_rag][agent] Нет. Если CalDAV обнаружил несколько календарей, а целевой календарь явно не выбран, чтение должно завершиться ошибкой с инструкцией выбрать календарь; объединять события из разных календарей нельзя [3][4].
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] Автоматически читать события допустимо только в двух случаях:
+[rag-eval][baseline_rag][agent]
+[rag-eval][baseline_rag][agent] - доступен ровно один календарь [2];
+[rag-eval][baseline_rag][agent] - настроенное имя однозначно соответствует одному из доступных календарей [3].
+[rag-eval][baseline_rag][metrics] status Answered · facts 100.0% · sources 100.0% · tokens 750 in / 91 out · 3284 ms
+[rag-eval][enhanced_rag] Rewrite, фильтр, reranking и generation...
+[rag-eval][enhanced_rag][source 1] openspec/specs/yandex-calendar-events/spec.md — Requirements > Requirement: Digest reads use the explicitly selected calendar · similarity 0.6888 · rerank 0.5583
+[rag-eval][enhanced_rag][source 2] openspec/specs/yandex-calendar-events/spec.md — Requirements > Requirement: Calendar target is selected without guessing · similarity 0.7008 · rerank 0.5191
+[rag-eval][enhanced_rag][source 3] openspec/specs/yandex-calendar-events/spec.md — Requirements > Requirement: Digest reads use the explicitly selected calendar > Scenario: One calendar is available · similarity 0.6983 · rerank 0.5174
+[rag-eval][enhanced_rag][source 4] openspec/specs/yandex-calendar-events/spec.md — Requirements > Requirement: Digest reads use the explicitly selected calendar > Scenario: Several calendars are ambiguous · similarity 0.6132 · rerank 0.4673
+[rag-eval][enhanced_rag][source 5] openspec/specs/yandex-calendar-events/spec.md — Requirements > Requirement: Calendar target is selected without guessing > Scenario: Several writable calendars exist without selection · similarity 0.5983 · rerank 0.4664
+[rag-eval][enhanced_rag][agent] Нет. Если CalDAV обнаружил несколько доступных календарей, а целевой календарь явно не выбран, чтение должно завершиться ошибкой. Объединять события из произвольных календарей нельзя, поскольку это может смешать личные данные [1][4].
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] Допустимы только два случая:
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] - доступен ровно один календарь — он выбирается автоматически [2][3];
+[rag-eval][enhanced_rag][agent] - при нескольких календарях настроено имя, которое однозначно соответствует одному из них [1][2].
+[rag-eval][enhanced_rag][agent]
+[rag-eval][enhanced_rag][agent] При неоднозначности следует запросить выбор календаря, а не читать или объединять события [4].
+[rag-eval][enhanced_rag][metrics] status Answered · facts 66.7% · sources 100.0% · tokens 902 in / 155 out · 6981 ms
+[rag-eval] Вопрос 10/10 завершён
+[rag-eval][summary][baseline_rag] facts 89.2% · sources 100.0% · tokens 8846 in / 1352 out · 43698 ms · no_context 0
+[rag-eval][summary][enhanced_rag] facts 88.3% · sources 100.0% · tokens 10413 in / 1528 out · 59332 ms · no_context 0
+[rag-eval] Сравнение записано: /Users/shimmy8/study/ai-challenge/reports/day23/comparison-v2.json

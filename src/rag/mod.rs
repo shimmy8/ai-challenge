@@ -5,7 +5,9 @@ mod embeddings;
 mod evaluation;
 mod index;
 mod metrics;
+mod rerank;
 mod retrieval;
+mod rewrite;
 
 pub(crate) use chunking::*;
 pub(crate) use config::*;
@@ -13,7 +15,9 @@ pub(crate) use documents::*;
 pub(crate) use embeddings::*;
 pub(crate) use evaluation::*;
 pub(crate) use metrics::*;
+pub(crate) use rerank::*;
 pub(crate) use retrieval::*;
+pub(crate) use rewrite::*;
 
 use anyhow::{Context, Result};
 use reqwest::Client;

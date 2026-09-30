@@ -24,7 +24,7 @@ pub(crate) fn parse_dump_metrics_flag(args: impl IntoIterator<Item = String>) ->
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum StartupMode {
     Interactive {
         dump_metrics: bool,
