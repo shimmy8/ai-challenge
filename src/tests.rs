@@ -1290,6 +1290,7 @@ mod suite {
             StartupMode::RagEval(RagEvalOptions {
                 questions: "reports/day22/control-questions.json".into(),
                 output: "reports/day22/comparison.json".into(),
+                retrieval: RetrievalConfig::default(),
             })
         );
     }
