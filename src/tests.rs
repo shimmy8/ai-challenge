@@ -21,9 +21,9 @@ mod suite {
         activate_memory_context, advance_task_if_confirmed, create_memory_entry_if_confirmed,
         create_profile_if_confirmed, create_task_if_confirmed, forget_memory_entry_if_confirmed,
         handle_profile_command, handle_rag_command, handle_remember_command, handle_task_command,
-        persist_answer_task_update, task_phase_completion_message, task_phase_continue_instruction,
-        task_phase_start_instruction, task_transition_prompt, ProfileCommandOutcome,
-        TaskCommandOutcome, TaskUpdateProgress,
+        persist_answer_task_update, should_retrieve_rag, task_phase_completion_message,
+        task_phase_continue_instruction, task_phase_start_instruction, task_transition_prompt,
+        ProfileCommandOutcome, TaskCommandOutcome, TaskUpdateProgress,
     };
     use std::{collections::VecDeque, sync::Mutex, time::Duration};
 
@@ -63,6 +63,7 @@ mod suite {
     struct ToolScriptClient {
         responses: Mutex<VecDeque<anyhow::Result<ApiAnswer>>>,
         options: Mutex<Vec<RequestOptions>>,
+        histories: Mutex<Vec<Vec<Message>>>,
     }
 
     impl ToolScriptClient {
@@ -70,6 +71,7 @@ mod suite {
             Arc::new(Self {
                 responses: Mutex::new(responses.into()),
                 options: Mutex::new(Vec::new()),
+                histories: Mutex::new(Vec::new()),
             })
         }
     }
@@ -88,10 +90,11 @@ mod suite {
             &'a self,
             _client: &'a Client,
             _settings: &'a AgentSettings,
-            _history: &'a [Message],
+            history: &'a [Message],
             options: &'a RequestOptions,
         ) -> RequestFuture<'a> {
             self.options.lock().unwrap().push(options.clone());
+            self.histories.lock().unwrap().push(history.to_vec());
             let response = self.responses.lock().unwrap().pop_front().unwrap();
             Box::pin(async move { response })
         }
@@ -261,6 +264,9 @@ mod suite {
             session_input_tokens: 0,
             session_output_tokens: 0,
             tool_calls: Vec::new(),
+            rag_citations: Vec::new(),
+            generation_requests: 1,
+            repair_requests: 0,
         })
     }
 
@@ -274,6 +280,9 @@ mod suite {
             session_input_tokens: 0,
             session_output_tokens: 0,
             tool_calls: vec![call],
+            rag_citations: Vec::new(),
+            generation_requests: 1,
+            repair_requests: 0,
         })
     }
 
@@ -457,6 +466,9 @@ mod suite {
             session_input_tokens: 0,
             session_output_tokens: 0,
             tool_calls: calls,
+            rag_citations: Vec::new(),
+            generation_requests: 1,
+            repair_requests: 0,
         };
         let client = ToolScriptClient::new(vec![Ok(first)]);
         let executor = Arc::new(RecordingExecutor {
@@ -1132,6 +1144,9 @@ mod suite {
             session_input_tokens: 0,
             session_output_tokens: 0,
             tool_calls: calls,
+            rag_citations: Vec::new(),
+            generation_requests: 1,
+            repair_requests: 0,
         };
         let client = ToolScriptClient::new(vec![Ok(first), scripted_answer("Готово")]);
         let executor = Arc::new(RecordingExecutor {
@@ -2593,6 +2608,9 @@ mod suite {
             session_input_tokens: 0,
             session_output_tokens: 0,
             tool_calls: Vec::new(),
+            rag_citations: Vec::new(),
+            generation_requests: 1,
+            repair_requests: 0,
         };
         process_task_answer(&mut answer, TaskPhase::Execution);
         assert_eq!(answer.text, "Результат");
@@ -2608,6 +2626,9 @@ mod suite {
             session_input_tokens: 0,
             session_output_tokens: 0,
             tool_calls: Vec::new(),
+            rag_citations: Vec::new(),
+            generation_requests: 1,
+            repair_requests: 0,
         };
         process_task_answer(&mut missing, TaskPhase::Planning);
         assert!(missing.task_update_warning.is_some());
@@ -2622,6 +2643,9 @@ mod suite {
             session_input_tokens: 0,
             session_output_tokens: 0,
             tool_calls: Vec::new(),
+            rag_citations: Vec::new(),
+            generation_requests: 1,
+            repair_requests: 0,
         };
         process_task_answer(&mut invalid, TaskPhase::Validation);
         assert_eq!(invalid.text, "Основной ответ");
@@ -2637,6 +2661,9 @@ mod suite {
             session_input_tokens: 0,
             session_output_tokens: 0,
             tool_calls: Vec::new(),
+            rag_citations: Vec::new(),
+            generation_requests: 1,
+            repair_requests: 0,
         };
         process_task_answer(&mut unfinished, TaskPhase::Execution);
         assert_eq!(unfinished.text, "Ожидаю схему orders.");
@@ -2683,6 +2710,9 @@ mod suite {
             session_input_tokens: 0,
             session_output_tokens: 0,
             tool_calls: Vec::new(),
+            rag_citations: Vec::new(),
+            generation_requests: 1,
+            repair_requests: 0,
         };
 
         assert_eq!(
@@ -2717,6 +2747,9 @@ mod suite {
             session_input_tokens: 0,
             session_output_tokens: 0,
             tool_calls: Vec::new(),
+            rag_citations: Vec::new(),
+            generation_requests: 1,
+            repair_requests: 0,
         };
         assert_eq!(
             persist_answer_task_update(&store, &mut pool, &mut final_answer),
@@ -2740,6 +2773,9 @@ mod suite {
             session_input_tokens: 0,
             session_output_tokens: 0,
             tool_calls: Vec::new(),
+            rag_citations: Vec::new(),
+            generation_requests: 1,
+            repair_requests: 0,
         };
         assert_eq!(
             persist_answer_task_update(&store, &mut pool, &mut duplicate),
@@ -2926,6 +2962,9 @@ mod suite {
             session_input_tokens: 0,
             session_output_tokens: 0,
             tool_calls: Vec::new(),
+            rag_citations: Vec::new(),
+            generation_requests: 1,
+            repair_requests: 0,
         };
 
         assert_eq!(
@@ -4292,6 +4331,135 @@ mod suite {
         assert_eq!(agent.history[1].content, "Ответ");
     }
 
+    fn rag_chunk() -> RetrievedChunk {
+        RetrievedChunk {
+            chunk_id: "chunk-1".into(),
+            source: "doc.md".into(),
+            title: "Документ".into(),
+            section: "Раздел".into(),
+            content: "Точная цитата из документа".into(),
+            similarity: 0.9,
+            original_similarity: 0.9,
+            rewritten_similarity: Some(0.8),
+            rerank_score: Some(0.85),
+        }
+    }
+
+    fn grounded_draft() -> &'static str {
+        "Подтверждённый ответ [1].\n\n<RAG_ATTRIBUTION>\ncitations[1]{id,context_id,source,section,chunk_id,quote}:\n  1,1,\"doc.md\",\"Раздел\",\"chunk-1\",\"Точная цитата\"\n</RAG_ATTRIBUTION>"
+    }
+
+    #[tokio::test]
+    async fn rag_answer_is_validated_before_history_and_disables_tools() {
+        let client = ToolScriptClient::new(vec![scripted_answer(grounded_draft())]);
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client.clone();
+        agent.set_tool_runtime(
+            Some(Arc::new(RecordingExecutor {
+                definitions: pipeline_definitions(),
+                calls: Mutex::new(Vec::new()),
+            })),
+            Arc::new(AutoApprove),
+        );
+
+        let answer = agent
+            .ask_rag("Вопрос", "RAG prompt", &[rag_chunk()])
+            .await
+            .unwrap();
+
+        assert_eq!((answer.generation_requests, answer.repair_requests), (1, 0));
+        assert_eq!(answer.rag_citations.len(), 1);
+        assert!(answer.text.contains("Источники:"));
+        assert!(!answer.text.contains("RAG_ATTRIBUTION"));
+        assert_eq!(agent.persisted_history.len(), 2);
+        assert_eq!(agent.persisted_history[0].content, "Вопрос");
+        assert_eq!(agent.persisted_history[1].content, answer.text);
+        assert!(client.options.lock().unwrap()[0].tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rag_repair_is_single_isolated_and_rolls_back_invalid_results() {
+        let client = ToolScriptClient::new(vec![
+            scripted_answer("невалидный draft"),
+            scripted_answer(grounded_draft()),
+        ]);
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client.clone();
+        let answer = agent
+            .ask_rag("Вопрос", "RAG prompt", &[rag_chunk()])
+            .await
+            .unwrap();
+        assert_eq!((answer.input_tokens, answer.output_tokens), (6, 4));
+        assert_eq!((answer.generation_requests, answer.repair_requests), (2, 1));
+        {
+            let histories = client.histories.lock().unwrap();
+            assert_eq!(histories.len(), 2);
+            assert!(histories[1]
+                .last()
+                .unwrap()
+                .content
+                .contains("invalid_draft_json"));
+        }
+        assert!(client
+            .options
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|item| item.tools.is_empty()));
+
+        let failing = ToolScriptClient::new(vec![
+            scripted_answer("первый невалидный"),
+            scripted_answer("второй невалидный"),
+        ]);
+        agent.request_client = failing.clone();
+        agent.settings.compression_strategy = CompressionStrategy::Branching;
+        agent.create_checkpoint();
+        let before = agent.persisted_history.clone();
+        let before_branch = agent.active_branch.clone();
+        let before_branches = agent.branches.len();
+        assert!(agent
+            .ask_rag("Ещё вопрос", "RAG prompt", &[rag_chunk()])
+            .await
+            .is_err());
+        assert_eq!(agent.persisted_history, before);
+        assert!(agent.branch_pending);
+        assert_eq!(agent.active_branch, before_branch);
+        assert_eq!(agent.branches.len(), before_branches);
+        assert_eq!(failing.options.lock().unwrap().len(), 2);
+
+        let provider_failure = ToolScriptClient::new(vec![
+            scripted_answer("невалидный"),
+            Err(anyhow::anyhow!("repair недоступен")),
+        ]);
+        agent.request_client = provider_failure.clone();
+        assert!(agent
+            .ask_rag("Третий вопрос", "RAG prompt", &[rag_chunk()])
+            .await
+            .is_err());
+        assert_eq!(agent.persisted_history, before);
+        assert_eq!(provider_failure.options.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn no_context_is_local_and_followup_can_use_grounded_generation() {
+        let client = ToolScriptClient::new(vec![scripted_answer(grounded_draft())]);
+        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        agent.request_client = client.clone();
+        let local = agent
+            .record_local_answer("Неясный вопрос", NO_RELEVANT_CONTEXT_ANSWER)
+            .unwrap();
+        assert_eq!(local.generation_requests, 0);
+        assert!(local.text.contains("Не знаю"));
+        assert!(client.options.lock().unwrap().is_empty());
+
+        let grounded = agent
+            .ask_rag("Уточнённый вопрос", "RAG prompt", &[rag_chunk()])
+            .await
+            .unwrap();
+        assert_eq!(grounded.generation_requests, 1);
+        assert_eq!(agent.persisted_history.len(), 4);
+    }
+
     #[test]
     fn rag_commands_toggle_and_report_process_state() {
         let mut enabled = false;
@@ -4314,5 +4482,12 @@ mod suite {
         );
         assert!(!enabled);
         assert!(handle_rag_command("/rag maybe", &mut enabled).is_err());
+    }
+
+    #[test]
+    fn rag_retrieval_is_skipped_when_disabled_or_input_is_automatic() {
+        assert!(!should_retrieve_rag(false, true));
+        assert!(!should_retrieve_rag(true, false));
+        assert!(should_retrieve_rag(true, true));
     }
 }

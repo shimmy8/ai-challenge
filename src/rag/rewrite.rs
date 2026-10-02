@@ -190,6 +190,9 @@ mod tests {
             session_input_tokens: 0,
             session_output_tokens: 0,
             tool_calls: Vec::new(),
+            rag_citations: Vec::new(),
+            generation_requests: 1,
+            repair_requests: 0,
         }
     }
 

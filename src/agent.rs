@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-use crate::{config::*, mcp::*, memory::*, providers::*, sessions::*};
+use crate::{config::*, mcp::*, memory::*, providers::*, rag::*, sessions::*};
 pub(crate) const SUMMARY_MAX_CHARS: usize = 4000;
 pub(crate) const MAX_MCP_CALLS_PER_REQUEST: usize = MAX_PIPELINE_STEPS;
 use anyhow::{anyhow, bail, Context, Result};
@@ -106,6 +106,9 @@ pub(crate) struct ApiAnswer {
     pub(crate) session_input_tokens: u64,
     pub(crate) session_output_tokens: u64,
     pub(crate) tool_calls: Vec<ToolCall>,
+    pub(crate) rag_citations: Vec<RagCitation>,
+    pub(crate) generation_requests: usize,
+    pub(crate) repair_requests: usize,
 }
 
 fn pipeline_result(
@@ -420,6 +423,208 @@ impl Agent {
             self.status = AgentStatus::Failed(error.to_string());
         }
         result
+    }
+
+    pub(crate) async fn ask_rag(
+        &mut self,
+        input: &str,
+        request_content: &str,
+        chunks: &[RetrievedChunk],
+    ) -> Result<ApiAnswer> {
+        let before = self.request_state();
+        self.status = AgentStatus::Running;
+        let result = self.ask_rag_inner(input, request_content, chunks).await;
+        if let Err(error) = &result {
+            self.restore_request_state(before);
+            self.status = AgentStatus::Failed(error.to_string());
+        }
+        result
+    }
+
+    async fn ask_rag_inner(
+        &mut self,
+        input: &str,
+        request_content: &str,
+        chunks: &[RetrievedChunk],
+    ) -> Result<ApiAnswer> {
+        self.prepare_context(input).await?;
+        if self.settings.compression_strategy == CompressionStrategy::Branching
+            && self.branch_pending
+        {
+            self.start_branch(input)?;
+        }
+        self.history.push(Message {
+            role: "user".to_owned(),
+            content: input.to_owned(),
+        });
+        self.persisted_history.push(Message {
+            role: "user".to_owned(),
+            content: input.to_owned(),
+        });
+        let mut request_history = self.history.clone();
+        request_history
+            .last_mut()
+            .context("не удалось подготовить RAG-запрос")?
+            .content = request_content.to_owned();
+
+        let mut answer = self
+            .request_client
+            .send_with_options(
+                &self.client,
+                &self.request_settings(),
+                &request_history,
+                &RequestOptions::default(),
+            )
+            .await?;
+        anyhow::ensure!(
+            answer.tool_calls.is_empty(),
+            "RAG generation неожиданно вернул tool calls"
+        );
+        self.session_input_tokens += answer.input_tokens;
+        self.session_output_tokens += answer.output_tokens;
+        let first_input_tokens = answer.input_tokens;
+        let first_output_tokens = answer.output_tokens;
+
+        let grounded = match parse_grounded_answer(&answer.text, chunks) {
+            Ok(grounded) => grounded,
+            Err(first_error) => {
+                let contract_request_id = format!(
+                    "agent-{}-{}",
+                    self.id,
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                );
+                log_rag_contract_failure(
+                    &contract_request_id,
+                    "generation",
+                    &first_error,
+                    &answer.text,
+                    chunks,
+                );
+                let repair_prompt =
+                    build_rag_repair_prompt(request_content, &answer.text, &first_error, chunks)?;
+                request_history
+                    .last_mut()
+                    .context("не удалось подготовить repair RAG-ответа")?
+                    .content = repair_prompt;
+                let mut repaired = self
+                    .request_client
+                    .send_with_options(
+                        &self.client,
+                        &self.request_settings(),
+                        &request_history,
+                        &RequestOptions::default(),
+                    )
+                    .await?;
+                anyhow::ensure!(
+                    repaired.tool_calls.is_empty(),
+                    "RAG repair неожиданно вернул tool calls"
+                );
+                self.session_input_tokens += repaired.input_tokens;
+                self.session_output_tokens += repaired.output_tokens;
+                repaired.input_tokens += first_input_tokens;
+                repaired.output_tokens += first_output_tokens;
+                repaired.generation_requests = 2;
+                repaired.repair_requests = 1;
+                let grounded = parse_grounded_answer(&repaired.text, chunks).map_err(|error| {
+                    log_rag_contract_failure(
+                        &contract_request_id,
+                        "repair",
+                        &error,
+                        &repaired.text,
+                        chunks,
+                    );
+                    anyhow!("RAG-ответ нарушил контракт ({})", error.code())
+                })?;
+                answer = repaired;
+                grounded
+            }
+        };
+
+        answer.text = grounded.rendered;
+        answer.rag_citations = grounded.citations;
+        if answer.generation_requests < 2 {
+            answer.generation_requests = 1;
+            answer.repair_requests = 0;
+        }
+        if !self.invariants.is_empty() {
+            let verdict = self.verify_draft(input, &answer.text).await?;
+            answer.input_tokens += verdict.0.input_tokens;
+            answer.output_tokens += verdict.0.output_tokens;
+            anyhow::ensure!(
+                verdict.1.verdict == VerificationVerdict::Allow,
+                "проверка инвариантов отклонила grounded RAG-ответ"
+            );
+        }
+        if let Some(task) = &self.memory.task {
+            process_task_answer(&mut answer, task.phase);
+        }
+        answer.session_input_tokens = self.session_input_tokens;
+        answer.session_output_tokens = self.session_output_tokens;
+        self.history.push(Message {
+            role: "assistant".to_owned(),
+            content: answer.text.clone(),
+        });
+        self.persisted_history.push(Message {
+            role: "assistant".to_owned(),
+            content: answer.text.clone(),
+        });
+        if matches!(
+            self.settings.compression_strategy,
+            CompressionStrategy::SlidingWindow | CompressionStrategy::StickyFacts
+        ) {
+            self.keep_recent_messages(0);
+        }
+        self.save_active_branch();
+        self.status = AgentStatus::Completed;
+        Ok(answer)
+    }
+
+    pub(crate) fn record_local_answer(&mut self, input: &str, text: &str) -> Result<ApiAnswer> {
+        if self.settings.compression_strategy == CompressionStrategy::Branching
+            && self.branch_pending
+        {
+            self.start_branch(input)?;
+        }
+        self.history.push(Message {
+            role: "user".to_owned(),
+            content: input.to_owned(),
+        });
+        self.persisted_history.push(Message {
+            role: "user".to_owned(),
+            content: input.to_owned(),
+        });
+        self.history.push(Message {
+            role: "assistant".to_owned(),
+            content: text.to_owned(),
+        });
+        self.persisted_history.push(Message {
+            role: "assistant".to_owned(),
+            content: text.to_owned(),
+        });
+        if matches!(
+            self.settings.compression_strategy,
+            CompressionStrategy::SlidingWindow | CompressionStrategy::StickyFacts
+        ) {
+            self.keep_recent_messages(0);
+        }
+        self.save_active_branch();
+        self.status = AgentStatus::Completed;
+        Ok(ApiAnswer {
+            text: text.to_owned(),
+            task_update: None,
+            task_update_warning: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            session_input_tokens: self.session_input_tokens,
+            session_output_tokens: self.session_output_tokens,
+            tool_calls: Vec::new(),
+            rag_citations: Vec::new(),
+            generation_requests: 0,
+            repair_requests: 0,
+        })
     }
 
     async fn ask_inner(&mut self, input: &str, request_content: Option<&str>) -> Result<ApiAnswer> {
@@ -1448,6 +1653,79 @@ impl AgentPool {
             });
         }
 
+        let mut results = Vec::new();
+        while let Some(task) = tasks.join_next().await {
+            match task {
+                Ok((agent, run)) => {
+                    self.agents.push(agent);
+                    results.push(run);
+                }
+                Err(error) => results.push(AgentRunResult {
+                    agent_id: 0,
+                    elapsed: std::time::Duration::ZERO,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    session_input_tokens: 0,
+                    session_output_tokens: 0,
+                    result: Err(anyhow!("задача агента аварийно завершилась: {error}")),
+                }),
+            }
+        }
+        self.agents.sort_by_key(|agent| agent.id);
+        results.sort_by_key(|run| run.agent_id);
+        results
+    }
+
+    pub(crate) async fn ask_all_rag(
+        &mut self,
+        input: &str,
+        request_content: &str,
+        chunks: &[RetrievedChunk],
+    ) -> Vec<AgentRunResult> {
+        let mut tasks = tokio::task::JoinSet::new();
+        for mut agent in self.agents.drain(..) {
+            let input = input.to_owned();
+            let request_content = request_content.to_owned();
+            let chunks = chunks.to_vec();
+            tasks.spawn(async move {
+                let started = Instant::now();
+                let before_input = agent.session_input_tokens;
+                let before_output = agent.session_output_tokens;
+                let result = agent.ask_rag(&input, &request_content, &chunks).await;
+                let run = AgentRunResult {
+                    agent_id: agent.id,
+                    elapsed: started.elapsed(),
+                    input_tokens: agent.session_input_tokens - before_input,
+                    output_tokens: agent.session_output_tokens - before_output,
+                    session_input_tokens: agent.session_input_tokens,
+                    session_output_tokens: agent.session_output_tokens,
+                    result,
+                };
+                (agent, run)
+            });
+        }
+        self.collect_runs(tasks).await
+    }
+
+    pub(crate) fn record_all_local(&mut self, input: &str, text: &str) -> Vec<AgentRunResult> {
+        self.agents
+            .iter_mut()
+            .map(|agent| AgentRunResult {
+                agent_id: agent.id,
+                elapsed: std::time::Duration::ZERO,
+                input_tokens: 0,
+                output_tokens: 0,
+                session_input_tokens: agent.session_input_tokens,
+                session_output_tokens: agent.session_output_tokens,
+                result: agent.record_local_answer(input, text),
+            })
+            .collect()
+    }
+
+    async fn collect_runs(
+        &mut self,
+        mut tasks: tokio::task::JoinSet<(Agent, AgentRunResult)>,
+    ) -> Vec<AgentRunResult> {
         let mut results = Vec::new();
         while let Some(task) = tasks.join_next().await {
             match task {

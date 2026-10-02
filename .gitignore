@@ -15,6 +15,7 @@
 .fox-index.db-shm
 .fox-index.db-wal
 fox-metrics.log
+.fox-rag-contract.log
 mcp.log
 .env
 .env.*

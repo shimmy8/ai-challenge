@@ -1,9 +1,10 @@
 use crate::{
-    agent::{Agent, AgentSettings, LiveRequestClient},
+    agent::{Agent, AgentSettings, ApiAnswer, LiveRequestClient},
     config::{Config, ModesConfig, CONFIG_FILE, MODES_FILE},
     rag::{
         build_rag_prompt, retrieve_baseline, retrieve_enhanced, CandidateTrace, RetrievalConfig,
         RetrievalOutcome, RetrievalResult, RetrievalTrace, RetrievedChunk,
+        NO_RELEVANT_CONTEXT_ANSWER,
     },
 };
 use anyhow::{bail, Context, Result};
@@ -108,6 +109,13 @@ struct AnswerResult {
     output_tokens: u64,
     duration_ms: u128,
     generation_duration_ms: u128,
+    generation_requests: usize,
+    repair_requests: usize,
+    has_sources: Option<bool>,
+    has_quotes: Option<bool>,
+    citations_valid: Option<bool>,
+    metadata_valid: Option<bool>,
+    quotes_exact: Option<bool>,
     sources: Vec<OwnedSourceResult>,
     retrieval: RetrievalTrace,
 }
@@ -116,8 +124,9 @@ struct AnswerResult {
 struct OwnedSourceResult {
     rank: usize,
     source: String,
-    title: String,
     section: String,
+    chunk_id: String,
+    quote: String,
     similarity: f32,
     original_similarity: f32,
     rewritten_similarity: Option<f32>,
@@ -143,6 +152,12 @@ struct Aggregate {
     output_tokens: u64,
     duration_ms: u128,
     generation_requests: usize,
+    repair_requests: usize,
+    source_presence_rate: Option<f64>,
+    quote_presence_rate: Option<f64>,
+    citation_validity_rate: Option<f64>,
+    metadata_validity_rate: Option<f64>,
+    exact_quote_rate: Option<f64>,
     no_relevant_context: usize,
 }
 
@@ -247,14 +262,16 @@ pub(crate) async fn run_rag_evaluation(options: RagEvalOptions) -> Result<()> {
         let generation_started = Instant::now();
         let mut baseline_agent = Agent::new(1, client.clone(), settings.clone());
         let baseline_answer = baseline_agent
-            .ask_with_context(&question.question, Some(&baseline_prompt))
+            .ask_rag(
+                &question.question,
+                &baseline_prompt,
+                &baseline_retrieval.chunks,
+            )
             .await?;
         let baseline_rag = answered_result(
-            baseline_answer.text,
+            baseline_answer,
             &question,
             baseline_retrieval,
-            baseline_answer.input_tokens,
-            baseline_answer.output_tokens,
             generation_started.elapsed().as_millis(),
             baseline_started.elapsed().as_millis(),
         );
@@ -278,14 +295,12 @@ pub(crate) async fn run_rag_evaluation(options: RagEvalOptions) -> Result<()> {
                 let generation_started = Instant::now();
                 let mut agent = Agent::new(1, client.clone(), settings.clone());
                 let answer = agent
-                    .ask_with_context(&question.question, Some(&prompt))
+                    .ask_rag(&question.question, &prompt, &retrieval.chunks)
                     .await?;
                 answered_result(
-                    answer.text,
+                    answer,
                     &question,
                     retrieval,
-                    answer.input_tokens,
-                    answer.output_tokens,
                     generation_started.elapsed().as_millis(),
                     enhanced_started.elapsed().as_millis(),
                 )
@@ -328,25 +343,38 @@ pub(crate) async fn run_rag_evaluation(options: RagEvalOptions) -> Result<()> {
 }
 
 fn answered_result(
-    answer: String,
+    answer: ApiAnswer,
     question: &ControlQuestion,
     retrieval: RetrievalResult,
-    generation_input: u64,
-    generation_output: u64,
     generation_duration_ms: u128,
     duration_ms: u128,
 ) -> AnswerResult {
     let trace = retrieval.trace;
+    let sources = owned_sources(&answer.rag_citations, &retrieval.chunks);
+    let source_recall = source_recall(
+        &question.expected_sources,
+        answer
+            .rag_citations
+            .iter()
+            .map(|citation| citation.source.as_str()),
+    );
     AnswerResult {
         status: OutcomeStatus::Answered,
-        fact_coverage: fact_coverage(&answer, &question.required_fact_fragments),
-        source_recall: source_recall(&question.expected_sources, &retrieval.chunks),
-        answer: Some(answer),
-        input_tokens: generation_input + trace.rewrite_input_tokens + trace.embedding_tokens,
-        output_tokens: generation_output + trace.rewrite_output_tokens,
+        fact_coverage: fact_coverage(&answer.text, &question.required_fact_fragments),
+        source_recall,
+        answer: Some(answer.text),
+        input_tokens: answer.input_tokens + trace.rewrite_input_tokens + trace.embedding_tokens,
+        output_tokens: answer.output_tokens + trace.rewrite_output_tokens,
         duration_ms,
         generation_duration_ms,
-        sources: owned_sources(&retrieval.chunks),
+        generation_requests: answer.generation_requests,
+        repair_requests: answer.repair_requests,
+        has_sources: Some(!sources.is_empty()),
+        has_quotes: Some(sources.iter().all(|source| !source.quote.trim().is_empty())),
+        citations_valid: Some(true),
+        metadata_valid: Some(true),
+        quotes_exact: Some(true),
+        sources,
         retrieval: trace,
     }
 }
@@ -358,31 +386,44 @@ fn no_context_result(
 ) -> AnswerResult {
     AnswerResult {
         status: OutcomeStatus::NoRelevantContext,
-        answer: None,
+        answer: Some(NO_RELEVANT_CONTEXT_ANSWER.to_owned()),
         fact_coverage: 0.0,
         source_recall: (!question.expected_sources.is_empty()).then_some(0.0),
         input_tokens: trace.rewrite_input_tokens + trace.embedding_tokens,
         output_tokens: trace.rewrite_output_tokens,
         duration_ms,
         generation_duration_ms: 0,
+        generation_requests: 0,
+        repair_requests: 0,
+        has_sources: None,
+        has_quotes: None,
+        citations_valid: None,
+        metadata_valid: None,
+        quotes_exact: None,
         sources: Vec::new(),
         retrieval: trace,
     }
 }
 
-fn owned_sources(chunks: &[RetrievedChunk]) -> Vec<OwnedSourceResult> {
-    chunks
+fn owned_sources(
+    citations: &[crate::rag::RagCitation],
+    chunks: &[RetrievedChunk],
+) -> Vec<OwnedSourceResult> {
+    citations
         .iter()
-        .enumerate()
-        .map(|(index, chunk)| OwnedSourceResult {
-            rank: index + 1,
-            source: chunk.source.clone(),
-            title: chunk.title.clone(),
-            section: chunk.section.clone(),
-            similarity: chunk.similarity,
-            original_similarity: chunk.original_similarity,
-            rewritten_similarity: chunk.rewritten_similarity,
-            rerank_score: chunk.rerank_score,
+        .map(|citation| {
+            let chunk = &chunks[citation.id - 1];
+            OwnedSourceResult {
+                rank: citation.id,
+                source: citation.source.clone(),
+                section: citation.section.clone(),
+                chunk_id: citation.chunk_id.clone(),
+                quote: citation.quote.clone(),
+                similarity: chunk.similarity,
+                original_similarity: chunk.original_similarity,
+                rewritten_similarity: chunk.rewritten_similarity,
+                rerank_score: chunk.rerank_score,
+            }
         })
         .collect()
 }
@@ -457,14 +498,14 @@ fn fact_coverage(answer: &str, facts: &[String]) -> f64 {
         .count() as f64
         / facts.len() as f64
 }
-fn source_recall(expected: &[String], chunks: &[RetrievedChunk]) -> Option<f64> {
+fn source_recall<'a>(
+    expected: &[String],
+    sources: impl IntoIterator<Item = &'a str>,
+) -> Option<f64> {
     if expected.is_empty() {
         return None;
     }
-    let found = chunks
-        .iter()
-        .map(|chunk| chunk.source.as_str())
-        .collect::<HashSet<_>>();
+    let found = sources.into_iter().collect::<HashSet<_>>();
     Some(
         expected
             .iter()
@@ -496,13 +537,31 @@ fn aggregate<'a>(
         duration_ms: answers.iter().map(|answer| answer.duration_ms).sum(),
         generation_requests: answers
             .iter()
-            .filter(|answer| answer.status == OutcomeStatus::Answered)
-            .count(),
+            .map(|answer| answer.generation_requests)
+            .sum(),
+        repair_requests: answers.iter().map(|answer| answer.repair_requests).sum(),
+        source_presence_rate: mean_optional_bool(&answers, |answer| answer.has_sources),
+        quote_presence_rate: mean_optional_bool(&answers, |answer| answer.has_quotes),
+        citation_validity_rate: mean_optional_bool(&answers, |answer| answer.citations_valid),
+        metadata_validity_rate: mean_optional_bool(&answers, |answer| answer.metadata_valid),
+        exact_quote_rate: mean_optional_bool(&answers, |answer| answer.quotes_exact),
         no_relevant_context: answers
             .iter()
             .filter(|answer| answer.status == OutcomeStatus::NoRelevantContext)
             .count(),
     }
+}
+
+fn mean_optional_bool(
+    answers: &[&AnswerResult],
+    select: impl Fn(&AnswerResult) -> Option<bool>,
+) -> Option<f64> {
+    let values = answers
+        .iter()
+        .filter_map(|answer| select(answer))
+        .collect::<Vec<_>>();
+    (!values.is_empty())
+        .then(|| values.iter().filter(|value| **value).count() as f64 / values.len() as f64)
 }
 
 fn write_json_atomically(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -630,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn no_context_is_serialized_without_answer_or_sources() {
+    fn no_context_is_serialized_with_refusal_and_without_sources() {
         let question = ControlQuestion {
             id: "q".into(),
             question: "Q".into(),
@@ -641,10 +700,76 @@ mod tests {
         let result = no_context_result(&question, trace(), 8);
         let value = serde_json::to_value(&result).unwrap();
         assert_eq!(value["status"], "no_relevant_context");
-        assert!(value["answer"].is_null());
+        assert!(value["answer"].as_str().unwrap().contains("Не знаю"));
         assert_eq!(value["fact_coverage"], 0.0);
         assert_eq!(value["sources"].as_array().unwrap().len(), 0);
         assert_eq!(value["input_tokens"], 6);
+        assert!(value["has_sources"].is_null());
+        assert_eq!(value["generation_requests"], 0);
+    }
+
+    #[test]
+    fn answered_result_serializes_grounding_checks_and_repair_metrics() {
+        let question = ControlQuestion {
+            id: "q".into(),
+            question: "Q".into(),
+            expectation: "E".into(),
+            required_fact_fragments: vec!["факт".into()],
+            expected_sources: vec!["doc.md".into()],
+        };
+        let chunk = RetrievedChunk {
+            chunk_id: "c1".into(),
+            source: "doc.md".into(),
+            title: "Doc".into(),
+            section: "Section".into(),
+            content: "точная цитата".into(),
+            similarity: 0.9,
+            original_similarity: 0.8,
+            rewritten_similarity: Some(0.9),
+            rerank_score: Some(0.85),
+        };
+        let mut retrieval_trace = trace();
+        retrieval_trace.candidates_after_filter = 1;
+        let retrieval = RetrievalResult {
+            chunks: vec![chunk],
+            trace: retrieval_trace,
+        };
+        let answer = ApiAnswer {
+            text: "факт [1]\n\nИсточники:\n[1] doc.md".into(),
+            task_update: None,
+            task_update_warning: None,
+            input_tokens: 10,
+            output_tokens: 5,
+            session_input_tokens: 10,
+            session_output_tokens: 5,
+            tool_calls: Vec::new(),
+            rag_citations: vec![crate::rag::RagCitation {
+                id: 1,
+                context_id: 1,
+                source: "doc.md".into(),
+                section: "Section".into(),
+                chunk_id: "c1".into(),
+                quote: "точная цитата".into(),
+            }],
+            generation_requests: 2,
+            repair_requests: 1,
+        };
+        let result = answered_result(answer, &question, retrieval, 12, 20);
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["has_sources"], true);
+        assert_eq!(value["has_quotes"], true);
+        assert_eq!(value["citations_valid"], true);
+        assert_eq!(value["metadata_valid"], true);
+        assert_eq!(value["quotes_exact"], true);
+        assert_eq!(value["generation_requests"], 2);
+        assert_eq!(value["repair_requests"], 1);
+        assert_eq!(value["sources"][0]["chunk_id"], "c1");
+        assert_eq!(value["sources"][0]["quote"], "точная цитата");
+        assert_eq!(result.source_recall, Some(1.0));
+        assert_eq!(
+            mean_optional_bool(&[&result], |answer| answer.has_sources),
+            Some(1.0)
+        );
     }
 
     #[test]
@@ -656,7 +781,7 @@ mod tests {
             ),
             0.5
         );
-        assert_eq!(source_recall(&[], &[]), None);
+        assert_eq!(source_recall(&[], std::iter::empty()), None);
     }
 
     #[test]
@@ -672,6 +797,17 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         assert_eq!(
             load_control_questions(&root, Path::new("reports/day22/control-questions.json"))
+                .unwrap()
+                .len(),
+            10
+        );
+    }
+
+    #[test]
+    fn day24_control_questions_are_valid() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(
+            load_control_questions(&root, Path::new("reports/day24/control-questions.json"))
                 .unwrap()
                 .len(),
             10
@@ -721,7 +857,7 @@ mod tests {
             self.histories.lock().unwrap().push(history.to_vec());
             Box::pin(async {
                 Ok(ApiAnswer {
-                    text: "ответ".into(),
+                    text: "ответ [1]\n\n<RAG_ATTRIBUTION>\ncitations[1]{id,context_id,source,section,chunk_id,quote}:\n  1,1,\"doc.md\",\"Section\",\"c\",\"context\"\n</RAG_ATTRIBUTION>".into(),
                     task_update: None,
                     task_update_warning: None,
                     input_tokens: 1,
@@ -729,6 +865,9 @@ mod tests {
                     session_input_tokens: 0,
                     session_output_tokens: 0,
                     tool_calls: Vec::new(),
+                    rag_citations: Vec::new(),
+                    generation_requests: 1,
+                    repair_requests: 0,
                 })
             })
         }
@@ -766,7 +905,7 @@ mod tests {
                 let mut agent = Agent::new(1, Client::new(), settings.clone());
                 agent.request_client = recorder.clone();
                 agent
-                    .ask_with_context(&question, Some(&prompt))
+                    .ask_rag(&question, &prompt, std::slice::from_ref(&chunk))
                     .await
                     .unwrap();
             }
