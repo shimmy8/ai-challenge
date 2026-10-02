@@ -265,7 +265,7 @@ fn numeric_markers(answer: &str) -> Vec<usize> {
     markers
 }
 
-fn render_grounded_answer(answer: &str, citations: &[RagCitation]) -> String {
+pub(crate) fn render_grounded_answer(answer: &str, citations: &[RagCitation]) -> String {
     let sources = citations
         .iter()
         .map(|citation| {
@@ -427,7 +427,7 @@ fn diagnostic_json_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"<invalid>\"".to_owned())
 }
 
-pub(crate) const NO_RELEVANT_CONTEXT_ANSWER: &str = "Не знаю: в проиндексированных документах не найден достаточно релевантный контекст. Уточните вопрос или добавьте больше конкретных терминов.";
+pub(crate) const NO_RELEVANT_CONTEXT_ANSWER: &str = "Не знаю: в проиндексированных документах не найден достаточно релевантный контекст. Уточните вопрос или добавьте больше конкретных терминов.\n\n## Источники\n\nРелевантные источники не найдены.";
 
 #[cfg(test)]
 mod tests {

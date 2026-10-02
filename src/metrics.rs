@@ -18,7 +18,10 @@ pub(crate) fn metrics_path() -> Result<PathBuf> {
 pub(crate) fn parse_dump_metrics_flag(args: impl IntoIterator<Item = String>) -> Result<bool> {
     match parse_startup_mode(args)? {
         StartupMode::Interactive { dump_metrics } => Ok(dump_metrics),
-        StartupMode::McpServer { .. } | StartupMode::Index(_) | StartupMode::RagEval(_) => {
+        StartupMode::McpServer { .. }
+        | StartupMode::Index(_)
+        | StartupMode::RagEval(_)
+        | StartupMode::RagChatEval(_) => {
             bail!("этот startup-режим нельзя использовать как флаг метрик")
         }
     }
@@ -35,6 +38,7 @@ pub(crate) enum StartupMode {
     },
     Index(crate::rag::IndexOptions),
     RagEval(crate::rag::RagEvalOptions),
+    RagChatEval(crate::rag::RagChatEvalOptions),
 }
 
 pub(crate) fn parse_startup_mode(args: impl IntoIterator<Item = String>) -> Result<StartupMode> {
@@ -59,12 +63,17 @@ pub(crate) fn parse_startup_mode(args: impl IntoIterator<Item = String>) -> Resu
             &args[1..],
         )?));
     }
+    if args.first().is_some_and(|value| value == "rag-chat-eval") {
+        return Ok(StartupMode::RagChatEval(
+            crate::rag::parse_rag_chat_eval_options(&args[1..])?,
+        ));
+    }
     let mut dump_metrics = false;
     for argument in args {
         match argument.as_str() {
             "--dump-metrics" if !dump_metrics => dump_metrics = true,
             "--dump-metrics" => bail!("аргумент указан более одного раза: {argument}"),
-            _ => bail!("неизвестный аргумент: {argument}. Доступны index, rag-eval, --dump-metrics и --mcp-server <kind> --addr <loopback:port>"),
+            _ => bail!("неизвестный аргумент: {argument}. Доступны index, rag-eval, rag-chat-eval, --dump-metrics и --mcp-server <kind> --addr <loopback:port>"),
         }
     }
     Ok(StartupMode::Interactive { dump_metrics })

@@ -1,0 +1,25 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.32s
+     Running `target/debug/fox-llm rag-chat-eval --scenarios reports/day25/scenarios.json --output reports/day25/results.json`
+[rag-chat-eval] Сценарий design-task-aware-rag-chat
+[rag-chat-eval][design-task-aware-rag-chat] Ход 1/10
+[rag-chat-eval][design-task-aware-rag-chat] Ход 2/10
+[rag-chat-eval][design-task-aware-rag-chat] Ход 3/10
+[rag-chat-eval][design-task-aware-rag-chat] Ход 4/10
+[rag-chat-eval][design-task-aware-rag-chat] Ход 5/10
+[rag-chat-eval][design-task-aware-rag-chat] Ход 6/10
+[rag-chat-eval][design-task-aware-rag-chat] Ход 7/10
+[rag-chat-eval][design-task-aware-rag-chat] Ход 8/10
+[rag-chat-eval][design-task-aware-rag-chat] Ход 9/10
+[rag-chat-eval][design-task-aware-rag-chat] Ход 10/10
+[rag-chat-eval] Сценарий verify-rag-index-and-memory
+[rag-chat-eval][verify-rag-index-and-memory] Ход 1/10
+[rag-chat-eval][verify-rag-index-and-memory] Ход 2/10
+[rag-chat-eval][verify-rag-index-and-memory] Ход 3/10
+[rag-chat-eval][verify-rag-index-and-memory] Ход 4/10
+[rag-chat-eval][verify-rag-index-and-memory] Ход 5/10
+[rag-chat-eval][verify-rag-index-and-memory] Ход 6/10
+[rag-chat-eval][verify-rag-index-and-memory] Ход 7/10
+[rag-chat-eval][verify-rag-index-and-memory] Ход 8/10
+[rag-chat-eval][verify-rag-index-and-memory] Ход 9/10
+[rag-chat-eval][verify-rag-index-and-memory] Ход 10/10
+[rag-chat-eval] Отчёт записан: /Users/shimmy8/study/ai-challenge/reports/day25/results.json
