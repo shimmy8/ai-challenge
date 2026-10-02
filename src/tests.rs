@@ -1279,6 +1279,20 @@ mod suite {
                 comparison_output: Some("comparison.json".into()),
             })
         );
+        assert_eq!(
+            parse_startup_mode(vec![
+                "rag-chat-eval".into(),
+                "--scenarios".into(),
+                "reports/day25/scenarios.json".into(),
+                "--output".into(),
+                "reports/day25/results.json".into(),
+            ])
+            .unwrap(),
+            StartupMode::RagChatEval(RagChatEvalOptions {
+                scenarios: "reports/day25/scenarios.json".into(),
+                output: "reports/day25/results.json".into(),
+            })
+        );
         assert!(parse_startup_mode(vec![
             "index".into(),
             "--embedding-config".into(),
@@ -4378,6 +4392,47 @@ mod suite {
     }
 
     #[tokio::test]
+    async fn grounded_rag_task_update_is_persisted_before_sources_are_rendered() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("sessions.db")).unwrap();
+        let task = store
+            .create_task("Мини-чат", "Сохранить цель диалога")
+            .unwrap();
+        let draft = "Ограничение принято [1].\nTASK_UPDATE:{\"f\":[\"SQLite обязателен\"],\"e\":[\"Собрать чат\"],\"v\":[\"Проверить источники\"]}\n\n<RAG_ATTRIBUTION>\ncitations[1]{id,context_id,source,section,chunk_id,quote}:\n  1,1,\"doc.md\",\"Раздел\",\"chunk-1\",\"Точная цитата\"\n</RAG_ATTRIBUTION>";
+        let client = ToolScriptClient::new(vec![scripted_answer(draft)]);
+        let mut agents = AgentPool::new(1, Client::new(), test_agent_settings());
+        agents.agents[0].request_client = client;
+        agents.set_memory(ActiveMemory {
+            task: Some(task),
+            ..ActiveMemory::default()
+        });
+
+        let mut runs = agents
+            .ask_all_rag("Учти ограничение", "RAG prompt", &[rag_chunk()])
+            .await;
+        let answer = runs[0].result.as_mut().unwrap();
+        assert!(answer.text.contains("Источники:"));
+        assert!(!answer.text.contains("TASK_UPDATE"));
+        persist_answer_task_update(&store, &mut agents, answer);
+
+        let memory = agents.memory();
+        assert!(memory
+            .task
+            .as_ref()
+            .unwrap()
+            .todo
+            .facts
+            .iter()
+            .any(|fact| fact == "SQLite обязателен"));
+        let context = RetrievalContext::from_state(agents.persisted_history(), &memory);
+        assert!(context
+            .task_facts
+            .iter()
+            .any(|fact| fact == "SQLite обязателен"));
+        assert_eq!(memory.task.unwrap().phase, TaskPhase::Planning);
+    }
+
+    #[tokio::test]
     async fn rag_repair_is_single_isolated_and_rolls_back_invalid_results() {
         let client = ToolScriptClient::new(vec![
             scripted_answer("невалидный draft"),
@@ -4450,6 +4505,8 @@ mod suite {
             .unwrap();
         assert_eq!(local.generation_requests, 0);
         assert!(local.text.contains("Не знаю"));
+        assert!(local.text.contains("Источники"));
+        assert!(local.rag_citations.is_empty());
         assert!(client.options.lock().unwrap().is_empty());
 
         let grounded = agent

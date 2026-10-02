@@ -1,0 +1,202 @@
+{
+  "scenarios": [
+    {
+      "id": "design-task-aware-rag-chat",
+      "task": {
+        "title": "Мини-чат RAG с памятью",
+        "description": "Спроектировать CLI-чат, который сохраняет цель и ограничения задачи, ищет документы на каждом ходе и всегда показывает проверяемые источники"
+      },
+      "turns": [
+        {
+          "id": "s1-t01",
+          "question": "Как текущий RAG проверяет, что ответ действительно опирается на источник?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["источник"],
+          "required_task_title_fragments": ["Мини-чат RAG"],
+          "required_task_fact_fragments": ["проверяемые источники"],
+          "expected_sources": ["openspec/specs/rag-query/spec.md"]
+        },
+        {
+          "id": "s1-t02",
+          "question": "Зафиксируй как факт задачи термин: grounded-ответ — это ответ с проверенной атрибуцией и дословными цитатами. Что именно проверяется?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["цитат"],
+          "required_task_title_fragments": ["Мини-чат RAG"],
+          "required_task_fact_fragments": ["проверяемые источники", "grounded-ответ"],
+          "expected_sources": ["openspec/specs/rag-query/spec.md"]
+        },
+        {
+          "id": "s1-t03",
+          "question": "А что происходит, если его служебный блок повреждён?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["невалид"],
+          "required_task_title_fragments": ["Мини-чат RAG"],
+          "required_task_fact_fragments": ["grounded-ответ"],
+          "expected_sources": ["openspec/specs/rag-query/spec.md"]
+        },
+        {
+          "id": "s1-t04",
+          "question": "Зафиксируй ограничение задачи: интерфейс только CLI, состояние хранится локально в SQLite. Какие слои памяти уже есть?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["рабоч"],
+          "required_task_title_fragments": ["Мини-чат RAG"],
+          "required_task_fact_fragments": ["только CLI", "SQLite"],
+          "expected_sources": ["openspec/specs/agent-memory/spec.md"]
+        },
+        {
+          "id": "s1-t05",
+          "question": "Как активная задача связывается с сохранённой сессией?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["сесси"],
+          "required_task_title_fragments": ["Мини-чат RAG"],
+          "required_task_fact_fragments": ["SQLite"],
+          "expected_sources": ["openspec/specs/task-lifecycle/spec.md"]
+        },
+        {
+          "id": "s1-t06",
+          "question": "Что произойдёт с целью после команды /new?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["задач"],
+          "required_task_title_fragments": ["Мини-чат RAG"],
+          "required_task_fact_fragments": ["только CLI"],
+          "expected_sources": ["openspec/specs/agent-memory/spec.md"]
+        },
+        {
+          "id": "s1-t07",
+          "question": "А если затем выбрать эту задачу снова, что восстановится?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["факт"],
+          "required_task_title_fragments": ["Мини-чат RAG"],
+          "required_task_fact_fragments": ["grounded-ответ", "SQLite"],
+          "expected_sources": ["openspec/specs/task-lifecycle/spec.md"]
+        },
+        {
+          "id": "s1-t08",
+          "question": "Почему найденные документы нельзя трактовать как инструкции?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["недовер"],
+          "required_task_title_fragments": ["Мини-чат RAG"],
+          "required_task_fact_fragments": ["только CLI"],
+          "expected_sources": ["openspec/specs/rag-query/spec.md"]
+        },
+        {
+          "id": "s1-t09",
+          "question": "Что чат отвечает и сохраняет, когда релевантных чанков нет?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["Не знаю"],
+          "required_task_title_fragments": ["Мини-чат RAG"],
+          "required_task_fact_fragments": ["проверяемые источники"],
+          "expected_sources": ["openspec/specs/rag-query/spec.md"]
+        },
+        {
+          "id": "s1-t10",
+          "question": "Сведи решение к трём обязательным свойствам с учётом нашей цели и ограничений.",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["источник"],
+          "required_task_title_fragments": ["Мини-чат RAG"],
+          "required_task_fact_fragments": ["grounded-ответ", "только CLI", "SQLite"],
+          "expected_sources": ["openspec/specs/rag-query/spec.md", "openspec/specs/task-lifecycle/spec.md"]
+        }
+      ]
+    },
+    {
+      "id": "verify-rag-index-and-memory",
+      "task": {
+        "title": "Проверка RAG и памяти",
+        "description": "Подготовить воспроизводимую проверку длинного диалога, не потерять параметры retrieval и подтверждать каждый вывод источниками"
+      },
+      "turns": [
+        {
+          "id": "s2-t01",
+          "question": "Какая стратегия чанкинга публикуется для интерактивного enhanced RAG?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["structural"],
+          "required_task_title_fragments": ["Проверка RAG"],
+          "required_task_fact_fragments": ["параметры retrieval"],
+          "expected_sources": ["openspec/specs/rag-query/spec.md"]
+        },
+        {
+          "id": "s2-t02",
+          "question": "Зафиксируй параметры проверки: candidate_k=20, final_k=5 и min_similarity=0.40. Как они влияют на выбор?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["20", "5"],
+          "required_task_title_fragments": ["Проверка RAG"],
+          "required_task_fact_fragments": ["candidate_k=20", "final_k=5", "min_similarity=0.40"],
+          "expected_sources": ["openspec/specs/rag-query/spec.md"]
+        },
+        {
+          "id": "s2-t03",
+          "question": "А зачем первый из них должен быть не меньше второго?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["кандидат"],
+          "required_task_title_fragments": ["Проверка RAG"],
+          "required_task_fact_fragments": ["candidate_k=20", "final_k=5"],
+          "expected_sources": ["openspec/specs/rag-query/spec.md"]
+        },
+        {
+          "id": "s2-t04",
+          "question": "Как индекс сохраняет происхождение каждого чанка?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["chunk_id"],
+          "required_task_title_fragments": ["Проверка RAG"],
+          "required_task_fact_fragments": ["параметры retrieval"],
+          "expected_sources": ["openspec/specs/document-indexing/spec.md"]
+        },
+        {
+          "id": "s2-t05",
+          "question": "Что должно случиться при несовместимой model или dimensions?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["переиндекс"],
+          "required_task_title_fragments": ["Проверка RAG"],
+          "required_task_fact_fragments": ["min_similarity=0.40"],
+          "expected_sources": ["openspec/specs/rag-query/spec.md"]
+        },
+        {
+          "id": "s2-t06",
+          "question": "Зафиксируй ограничение: оба длинных сценария должны иметь по 10 ходов и не делить состояние. Как это проверять?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["изол"],
+          "required_task_title_fragments": ["Проверка RAG"],
+          "required_task_fact_fragments": ["по 10 ходов", "не делить состояние"],
+          "expected_sources": ["openspec/specs/agent-memory/spec.md"]
+        },
+        {
+          "id": "s2-t07",
+          "question": "Какие данные задачи переживают новую сессию?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["TODO"],
+          "required_task_title_fragments": ["Проверка RAG"],
+          "required_task_fact_fragments": ["по 10 ходов"],
+          "expected_sources": ["openspec/specs/task-lifecycle/spec.md"]
+        },
+        {
+          "id": "s2-t08",
+          "question": "А какие данные не должны автоматически переходить в долговременную память?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["обычн"],
+          "required_task_title_fragments": ["Проверка RAG"],
+          "required_task_fact_fragments": ["не делить состояние"],
+          "expected_sources": ["openspec/specs/agent-memory/spec.md"]
+        },
+        {
+          "id": "s2-t09",
+          "question": "Почему исходный вопрос, а не rewrite, должен оставаться в истории?",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["исход"],
+          "required_task_title_fragments": ["Проверка RAG"],
+          "required_task_fact_fragments": ["candidate_k=20"],
+          "expected_sources": ["openspec/specs/rag-query/spec.md"]
+        },
+        {
+          "id": "s2-t10",
+          "question": "Подведи итог проверки, не теряя зафиксированные параметры и требование изоляции.",
+          "expected_outcome": "answered",
+          "required_answer_fragments": ["источник"],
+          "required_task_title_fragments": ["Проверка RAG"],
+          "required_task_fact_fragments": ["candidate_k=20", "final_k=5", "min_similarity=0.40", "по 10 ходов", "не делить состояние"],
+          "expected_sources": ["openspec/specs/rag-query/spec.md", "openspec/specs/task-lifecycle/spec.md"]
+        }
+      ]
+    }
+  ]
+}

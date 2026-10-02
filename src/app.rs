@@ -133,6 +133,9 @@ pub(crate) async fn run() -> Result<()> {
     if let StartupMode::RagEval(options) = startup_mode {
         return run_rag_evaluation(options).await;
     }
+    if let StartupMode::RagChatEval(options) = startup_mode {
+        return run_rag_chat_evaluation(options).await;
+    }
     let StartupMode::Interactive { dump_metrics } = startup_mode else {
         unreachable!();
     };
@@ -668,6 +671,9 @@ pub(crate) async fn run() -> Result<()> {
             user_question,
         ) {
             let root = std::env::current_dir()?.canonicalize()?;
+            let retrieval_memory = agents.memory();
+            let retrieval_context =
+                RetrievalContext::from_state(agents.persisted_history(), &retrieval_memory);
             let agent = agents
                 .agents
                 .first()
@@ -682,6 +688,7 @@ pub(crate) async fn run() -> Result<()> {
                 agent.client.clone(),
                 agent.request_client.clone(),
                 agent.settings.clone(),
+                retrieval_context,
                 RetrievalConfig::default(),
             )
             .await

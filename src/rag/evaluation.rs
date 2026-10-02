@@ -3,7 +3,7 @@ use crate::{
     config::{Config, ModesConfig, CONFIG_FILE, MODES_FILE},
     rag::{
         build_rag_prompt, retrieve_baseline, retrieve_enhanced, CandidateTrace, RetrievalConfig,
-        RetrievalOutcome, RetrievalResult, RetrievalTrace, RetrievedChunk,
+        RetrievalContext, RetrievalOutcome, RetrievalResult, RetrievalTrace, RetrievedChunk,
         NO_RELEVANT_CONTEXT_ANSWER,
     },
 };
@@ -285,6 +285,7 @@ pub(crate) async fn run_rag_evaluation(options: RagEvalOptions) -> Result<()> {
             client.clone(),
             Arc::new(LiveRequestClient),
             settings.clone(),
+            RetrievalContext::default(),
             options.retrieval,
         )
         .await?;

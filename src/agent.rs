@@ -543,7 +543,11 @@ impl Agent {
             }
         };
 
-        answer.text = grounded.rendered;
+        answer.text = grounded.answer;
+        if let Some(task) = &self.memory.task {
+            process_task_answer(&mut answer, task.phase);
+        }
+        answer.text = render_grounded_answer(&answer.text, &grounded.citations);
         answer.rag_citations = grounded.citations;
         if answer.generation_requests < 2 {
             answer.generation_requests = 1;
@@ -557,9 +561,6 @@ impl Agent {
                 verdict.1.verdict == VerificationVerdict::Allow,
                 "проверка инвариантов отклонила grounded RAG-ответ"
             );
-        }
-        if let Some(task) = &self.memory.task {
-            process_task_answer(&mut answer, task.phase);
         }
         answer.session_input_tokens = self.session_input_tokens;
         answer.session_output_tokens = self.session_output_tokens;

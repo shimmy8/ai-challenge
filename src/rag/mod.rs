@@ -1,6 +1,8 @@
 mod answer;
+mod chat_evaluation;
 mod chunking;
 mod config;
+mod context;
 mod documents;
 mod embeddings;
 mod evaluation;
@@ -11,8 +13,10 @@ mod retrieval;
 mod rewrite;
 
 pub(crate) use answer::*;
+pub(crate) use chat_evaluation::*;
 pub(crate) use chunking::*;
 pub(crate) use config::*;
+pub(crate) use context::*;
 pub(crate) use documents::*;
 pub(crate) use embeddings::*;
 pub(crate) use evaluation::*;
