@@ -70,6 +70,9 @@ pub(crate) async fn send_openai(
         session_input_tokens: 0,
         session_output_tokens: 0,
         tool_calls,
+        rag_citations: Vec::new(),
+        generation_requests: 1,
+        repair_requests: 0,
     })
 }
 
@@ -179,6 +182,9 @@ pub(crate) async fn send_claude(
         session_input_tokens: 0,
         session_output_tokens: 0,
         tool_calls,
+        rag_citations: Vec::new(),
+        generation_requests: 1,
+        repair_requests: 0,
     })
 }
 

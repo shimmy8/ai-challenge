@@ -1,3 +1,4 @@
+mod answer;
 mod chunking;
 mod config;
 mod documents;
@@ -9,6 +10,7 @@ mod rerank;
 mod retrieval;
 mod rewrite;
 
+pub(crate) use answer::*;
 pub(crate) use chunking::*;
 pub(crate) use config::*;
 pub(crate) use documents::*;

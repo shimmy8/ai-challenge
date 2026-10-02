@@ -662,7 +662,11 @@ pub(crate) async fn run() -> Result<()> {
         }
         let user_question = automatic_input.is_none();
         let mut request_input = automatic_input.unwrap_or(input);
-        let mut rag_chunks: Option<Vec<RetrievedChunk>> = if rag_enabled && user_question {
+        let mut rag_no_context = false;
+        let mut rag_chunks: Option<Vec<RetrievedChunk>> = if should_retrieve_rag(
+            rag_enabled,
+            user_question,
+        ) {
             let root = std::env::current_dir()?.canonicalize()?;
             let agent = agents
                 .agents
@@ -704,7 +708,8 @@ pub(crate) async fn run() -> Result<()> {
                         ))
                         .yellow()
                     );
-                    continue 'interactive;
+                    rag_no_context = true;
+                    None
                 }
                 Err(error) => {
                     eprintln!("{} {error:#}\n", style("RAG-запрос не выполнен:").red());
@@ -721,14 +726,11 @@ pub(crate) async fn run() -> Result<()> {
                 .agents
                 .first()
                 .is_some_and(|agent| agent.branch_pending);
-            let rag_prompt = rag_chunks
-                .as_ref()
-                .map(|chunks| build_rag_prompt(&request_input, chunks))
-                .transpose()?;
-            let mut results = if let Some(prompt) = rag_prompt.as_deref() {
-                agents
-                    .ask_all_with_context(&request_input, Some(prompt))
-                    .await
+            let mut results = if rag_no_context {
+                agents.record_all_local(&request_input, NO_RELEVANT_CONTEXT_ANSWER)
+            } else if let Some(chunks) = rag_chunks.as_ref() {
+                let prompt = build_rag_prompt(&request_input, chunks)?;
+                agents.ask_all_rag(&request_input, &prompt, chunks).await
             } else {
                 agents.ask_all(&request_input).await
             };
@@ -821,13 +823,6 @@ pub(crate) async fn run() -> Result<()> {
                         if let Some(warning) = &answer.task_update_warning {
                             eprintln!("{} {warning}", style("Предупреждение задачи:").yellow());
                         }
-                        if let Some(chunks) = &rag_chunks {
-                            println!(
-                                "{}\n{}\n",
-                                style("Переданные RAG-источники:").yellow().bold(),
-                                format_sources(chunks)
-                            );
-                        }
                         println!(
                             "{}\n",
                             style(format!(
@@ -892,6 +887,10 @@ pub(crate) fn handle_rag_command(command: &str, enabled: &mut bool) -> Result<St
         )),
         _ => bail!("используйте /rag on, /rag off или /rag status"),
     }
+}
+
+pub(crate) fn should_retrieve_rag(enabled: bool, user_question: bool) -> bool {
+    enabled && user_question
 }
 
 #[derive(Debug, PartialEq, Eq)]

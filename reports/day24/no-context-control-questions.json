@@ -1,0 +1,18 @@
+[
+  {
+    "id": "kepler-186f-atmosphere-2026",
+    "question": "Каков химический состав атмосферы экзопланеты Кеплер-186f по результатам спектральных измерений 2026 года?",
+    "expectation": "В проиндексированном корпусе нет ответа; retrieval должен завершиться со статусом no_relevant_context, а ассистент — ответить «Не знаю» и попросить уточнить вопрос.",
+    "expected_status": "no_relevant_context",
+    "expected_sources": [],
+    "observed_result": "passed"
+  },
+  {
+    "id": "fictional-restaurant-sauce",
+    "question": "Какой рецепт фирменного соуса используется в вымышленном ресторане «Лунный пельмень» в Киото?",
+    "expectation": "В проиндексированном корпусе нет ответа; retrieval должен завершиться со статусом no_relevant_context, а ассистент — ответить «Не знаю» и попросить уточнить вопрос.",
+    "expected_status": "no_relevant_context",
+    "expected_sources": [],
+    "observed_result": "passed"
+  }
+]

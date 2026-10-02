@@ -1,0 +1,349 @@
+{
+  "methodology": "single-session interactive evaluation",
+  "session_id": 37,
+  "started_at": "2026-10-01T21:43:03+03:00",
+  "completed_at": "2026-10-01T21:44:50+03:00",
+  "retrieval": {
+    "mode": "enhanced",
+    "candidate_k": 20,
+    "final_k": 5,
+    "min_similarity": 0.4
+  },
+  "metrics_availability": {
+    "tokens": false,
+    "duration_ms": false,
+    "reason": "Интерактивный запуск выполнен без --dump-metrics; история SQLite не хранит токены и длительность отдельных запросов."
+  },
+  "aggregates": {
+    "questions": 10,
+    "answered": 10,
+    "no_relevant_context": 0,
+    "answers_with_sources": 10,
+    "answers_with_quotes": 10,
+    "citations_valid": 10,
+    "metadata_valid": 10,
+    "quotes_exact": 10,
+    "citations_total": 19,
+    "generation_requests": 10,
+    "repair_requests": 0,
+    "semantic_yes": 9,
+    "semantic_partial": 1,
+    "semantic_no": 0
+  },
+  "results": [
+    {
+      "id": "mcp-new-tool-default",
+      "question": "Что происходит с новым инструментом после очередного tools/list, когда его начинает объявлять уже зарегистрированный сервер MCP?",
+      "status": "answered",
+      "answer": "После успешного tools/list новый инструмент автоматически становится доступным агенту, если его имя не находится в denylist этого сервера; при следующем подключении агент сможет использовать его, если пользователь явно его не отключил.",
+      "has_sources": true,
+      "has_quotes": true,
+      "citations_valid": true,
+      "metadata_valid": true,
+      "quotes_exact": true,
+      "generation_requests": 1,
+      "repair_requests": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "duration_ms": null,
+      "semantic_match": "да",
+      "semantic_comment": "Цитаты прямо подтверждают включение обнаруженного инструмента по умолчанию и исключение через denylist.",
+      "sources": [
+        {
+          "source": "openspec/specs/mcp-tool-management/spec.md",
+          "section": "mcp-tool-management Specification > Requirements > Requirement: Discovered tools are enabled by default",
+          "chunk_id": "a21862b1a385fd835466171a88093885c269a739fa63dbb8a334d95164e834de",
+          "quote": "После успешного `tools/list` система SHALL считать доступным каждый инструмент, имя которого отсутствует в denylist данного сервера."
+        },
+        {
+          "source": "openspec/specs/mcp-tool-management/spec.md",
+          "section": "mcp-tool-management Specification > Requirements > Requirement: Discovered tools are enabled by default > Scenario: Server adds a new tool",
+          "chunk_id": "c932d2854e330d3edf75ff35c38d3a1af60b6f40252b910b76099858c231f1e1",
+          "quote": "инструмент доступен агенту при следующем подключении, если пользователь явно его не отключил"
+        }
+      ]
+    },
+    {
+      "id": "invariant-verifier-outcomes",
+      "question": "Какие четыре исхода может вернуть отдельная проверка глобальных инвариантов и при каких исходах черновик ответа разрешено принять?",
+      "status": "answered",
+      "answer": "Проверка возвращает allow, compliant_refusal, violation или uncertain; черновик принимается только при allow или compliant_refusal.",
+      "has_sources": true,
+      "has_quotes": true,
+      "citations_valid": true,
+      "metadata_valid": true,
+      "quotes_exact": true,
+      "generation_requests": 1,
+      "repair_requests": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "duration_ms": null,
+      "semantic_match": "да",
+      "semantic_comment": "Единственная цитата полностью перечисляет четыре исхода и два разрешённых результата.",
+      "sources": [
+        {
+          "source": "openspec/specs/global-invariants/spec.md",
+          "section": "Global Invariants Specification > Requirements > Requirement: Ответ проверяется отдельно до выдачи и сохранения",
+          "chunk_id": "e6172654af8d0a1a58b60cf9faee7df85f861215846e752c8f641e248d84c241",
+          "quote": "Проверка SHALL возвращать один из исходов `allow`, `compliant_refusal`, `violation`, `uncertain` и идентификаторы применимых инвариантов. Система SHALL принимать черновик только при исходах `allow` или `compliant_refusal`."
+        }
+      ]
+    },
+    {
+      "id": "isolated-ai-context",
+      "question": "Какие данные и возможности запрещено передавать модельному запросу инструмента ai.generate_text кроме его инструкций и входа текущего вызова, включая инструменты MCP?",
+      "status": "answered",
+      "answer": "Изолированный запрос не получает интерактивную историю, профиль, долговременную память, активную задачу, MCP-инструменты или право выполнять внешние действия.",
+      "has_sources": true,
+      "has_quotes": true,
+      "citations_valid": true,
+      "metadata_valid": true,
+      "quotes_exact": true,
+      "generation_requests": 1,
+      "repair_requests": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "duration_ms": null,
+      "semantic_match": "да",
+      "semantic_comment": "Цитата дословно покрывает весь перечень запрещённых данных и возможностей.",
+      "sources": [
+        {
+          "source": "openspec/specs/isolated-ai-processing/spec.md",
+          "section": "isolated-ai-processing Specification > Requirements > Requirement: AI processing has isolated context and no tools",
+          "chunk_id": "39ac623be6041081fd8c23e0cc0a65c8b8b7461de6a26c0d2acfce801ef6c728",
+          "quote": "Модельный запрос инструмента MUST содержать только фиксированные системные ограничения, переданные инструкции и вход текущего вызова. Он MUST NOT получать интерактивную историю, профиль, долговременную память, активную задачу, MCP-инструменты или право выполнять внешние действия."
+        }
+      ]
+    },
+    {
+      "id": "mcp-safe-lifecycle-logs",
+      "question": "Какие данные обязаны содержать логи жизненного цикла локального вызова MCP и какие данные полезной нагрузки они по умолчанию раскрывать не должны?",
+      "status": "answered",
+      "answer": "Логи содержат correlation ID, server ID, нативное имя инструмента, при наличии идентификатор шага, статус и длительность; полные аргументы, результаты и credentials не раскрываются.",
+      "has_sources": true,
+      "has_quotes": true,
+      "citations_valid": true,
+      "metadata_valid": true,
+      "quotes_exact": true,
+      "generation_requests": 1,
+      "repair_requests": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "duration_ms": null,
+      "semantic_match": "да",
+      "semantic_comment": "Первая цитата подтверждает обязательные поля, вторая — исключение payload и credentials.",
+      "sources": [
+        {
+          "source": "openspec/specs/mcp-call-observability/spec.md",
+          "section": "mcp-call-observability Specification > Requirements > Requirement: Every server MCP call emits correlated lifecycle logs",
+          "chunk_id": "c040b18c77b597f31f6bbb0bcf0eee3ad02a07ade67bf6bedf354fc3fd888dfc",
+          "quote": "Каждый целевой локальный MCP-сервер SHALL печатать в stdout своего отдельного процесса однострочные записи начала и завершения вызова. Записи MUST включать correlation ID, server ID, нативное имя инструмента, идентификатор шага при наличии, статус и длительность завершённого вызова."
+        },
+        {
+          "source": "openspec/specs/mcp-call-observability/spec.md",
+          "section": "mcp-call-observability Specification > Requirements > Requirement: Logs exclude payloads and credentials by default",
+          "chunk_id": "3b929a7c6b3d716903b32abf03b9697804f0fe73f196e4d3ccfddb70868e65dc",
+          "quote": "Логи MCP-вызовов MUST NOT содержать полные аргументы, результаты, authorization headers, API keys, CalDAV credentials, Telegram token или chat ID. Безопасные идентификаторы сервера, инструмента, job, run и step MAY выводиться для корреляции."
+        }
+      ]
+    },
+    {
+      "id": "pipeline-middle-step-failure",
+      "question": "Как должен завершиться pipeline при ошибке промежуточного шага и выполняется ли автоматический rollback уже совершённых действий?",
+      "status": "answered",
+      "answer": "Pipeline останавливается после первого сбоя, последующие шаги отмечаются skipped, уже выполненные действия отражаются в результате; автоматический rollback не выполняется.",
+      "has_sources": true,
+      "has_quotes": true,
+      "citations_valid": true,
+      "metadata_valid": true,
+      "quotes_exact": true,
+      "generation_requests": 1,
+      "repair_requests": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "duration_ms": null,
+      "semantic_match": "да",
+      "semantic_comment": "Цитаты прямо подтверждают остановку, skipped, сохранение trace совершённых действий и отсутствие rollback.",
+      "sources": [
+        {
+          "source": "openspec/specs/mcp-pipeline-execution/spec.md",
+          "section": "mcp-pipeline-execution Specification > Requirements > Requirement: Pipeline execution is sequential and fail-closed",
+          "chunk_id": "9fe6624081d6ee27385cec73a45c75a2ff7554b2e42b1ff895d5c4e7b3333b74",
+          "quote": "Система SHALL выполнять шаги строго в объявленном порядке и MUST остановиться после первого результата с ошибкой, тайм-аута, отклонённого подтверждения либо недоступности инструмента. Уже выполненные внешние действия MUST быть отражены в итоговом результате, а невыполненные шаги MUST быть отмечены как skipped; система MUST NOT предпринимать автоматический rollback."
+        },
+        {
+          "source": "openspec/specs/mcp-pipeline-execution/spec.md",
+          "section": "mcp-pipeline-execution Specification > Requirements > Requirement: Pipeline execution is sequential and fail-closed > Scenario: Failure follows a completed write",
+          "chunk_id": "63c9e6b08084e271b913995f97cfcd2e5f32ff2f4693ebd42f2cdeba817208a9",
+          "quote": "- **WHEN** изменяющий состояние шаг уже успешно завершён, а более поздний шаг завершается ошибкой\n- **THEN** система явно сообщает о состоявшемся действии и последующей ошибке, не заявляя об откате"
+        }
+      ]
+    },
+    {
+      "id": "scheduled-job-change-approval",
+      "question": "Нужно ли заново подтверждать сохранённое задание orchestrator, если меняется его расписание, шаг, инструмент или аргумент?",
+      "status": "answered",
+      "answer": "Да: любое изменение расписания или структуры pipeline требует нового предварительного просмотра и явного подтверждения.",
+      "has_sources": true,
+      "has_quotes": true,
+      "citations_valid": true,
+      "metadata_valid": true,
+      "quotes_exact": true,
+      "generation_requests": 1,
+      "repair_requests": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "duration_ms": null,
+      "semantic_match": "да",
+      "semantic_comment": "Обе цитаты прямо подтверждают повторное подтверждение при любом изменении задания.",
+      "sources": [
+        {
+          "source": "openspec/specs/scheduled-pipeline-jobs/spec.md",
+          "section": "scheduled-pipeline-jobs Specification > Requirements > Requirement: Job creation authorizes an immutable future action",
+          "chunk_id": "8b53229aef4a25ea77d955692bf9f6404871e515c09dd665a774f03a8da08ba7",
+          "quote": "Одно явное подтверждение SHALL разрешать будущие запуски только этого неизменяемого pipeline; изменение расписания, шага, инструмента или аргумента MUST требовать нового подтверждения."
+        },
+        {
+          "source": "openspec/specs/scheduled-pipeline-jobs/spec.md",
+          "section": "scheduled-pipeline-jobs Specification > Requirements > Requirement: Job creation authorizes an immutable future action > Scenario: Job definition changes",
+          "chunk_id": "6062640ec1f4b27b5c21cbefa603dbdd71cf8de4e09b6aaa5cee785573795cdf",
+          "quote": "- **WHEN** предлагается изменить подтверждённое расписание или pipeline\n- **THEN** система не изменяет существующее задание без нового предварительного просмотра и подтверждения"
+        }
+      ]
+    },
+    {
+      "id": "telegram-fixed-destination",
+      "question": "Какие аргументы принимает telegram.send_message и откуда должны браться Bot token и chat ID?",
+      "status": "answered",
+      "answer": "Инструмент принимает только непустой ограниченный по длине текст; Bot token и chat ID берутся только из локальной конфигурации сервера.",
+      "has_sources": true,
+      "has_quotes": true,
+      "citations_valid": true,
+      "metadata_valid": true,
+      "quotes_exact": true,
+      "generation_requests": 1,
+      "repair_requests": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "duration_ms": null,
+      "semantic_match": "да",
+      "semantic_comment": "Основная цитата полностью подтверждает контракт аргументов и источник конфигурации.",
+      "sources": [
+        {
+          "source": "openspec/specs/telegram-message-delivery/spec.md",
+          "section": "telegram-message-delivery Specification > Requirements > Requirement: Telegram server exposes a fixed-destination sink",
+          "chunk_id": "9d0fda7f43945b27a5de2551c6e723318dd6301c181ea2b4551652fb4b73d2a9",
+          "quote": "Сервер `telegram` SHALL предоставлять изменяющий состояние инструмент `send_message`, принимающий только непустой текст в установленном пределе. Bot token и chat ID MUST поступать только из локальной конфигурации сервера и MUST NOT приниматься как аргументы инструмента."
+        },
+        {
+          "source": "openspec/specs/telegram-message-delivery/spec.md",
+          "section": "telegram-message-delivery Specification > Requirements > Requirement: Telegram secrets never leave the server boundary",
+          "chunk_id": "b8d303a7651c6ac3f6ebedd12efe748aa3f708c8da20cd248bdd765cdea51845",
+          "quote": "Отсутствующая или неполная конфигурация SHALL приводить к безопасной ошибке до сетевого запроса."
+        }
+      ]
+    },
+    {
+      "id": "embedding-cache-and-failure",
+      "question": "По какому ключу индексатор переиспользует embeddings и что остаётся доступным, если повторная индексация завершается ошибкой?",
+      "status": "answered",
+      "answer": "Индексатор переиспользует совместимые embeddings по хешу чанка; при сбое остаётся доступен последний успешно опубликованный набор чанков каждой стратегии без частичной замены.",
+      "has_sources": true,
+      "has_quotes": true,
+      "citations_valid": true,
+      "metadata_valid": true,
+      "quotes_exact": true,
+      "generation_requests": 1,
+      "repair_requests": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "duration_ms": null,
+      "semantic_match": "частично",
+      "semantic_comment": "Цитаты подтверждают reuse по новым хешам и сохранение последнего индекса, но ответ не раскрывает полный ключ совместимости: хеш нормализованного текста, модель и размерность.",
+      "sources": [
+        {
+          "source": "openspec/specs/document-indexing/spec.md",
+          "section": "document-indexing Specification > Requirements > Requirement: SQLite-индекс сохраняет данные атомарно и переиспользует embeddings > Scenario: Изменился один документ",
+          "chunk_id": "bb84198cc52b1ecfba6adc5b99e19537a2a44f2b1b3d67d2e8a2230dbb7d8248",
+          "quote": "- **THEN** система запрашивает embeddings только для новых хешей и переиспользует остальные совместимые векторы"
+        },
+        {
+          "source": "openspec/specs/document-indexing/spec.md",
+          "section": "document-indexing Specification > Requirements > Requirement: SQLite-индекс сохраняет данные атомарно и переиспользует embeddings > Scenario: Сбой не уничтожает предыдущий индекс",
+          "chunk_id": "30652f438d26bad42731e4e0ddd4cf0e1ea4f419aa08bd1d00fdd8107405223e",
+          "quote": "- **THEN** последний успешный набор чанков каждой стратегии остаётся доступным без частичной замены"
+        }
+      ]
+    },
+    {
+      "id": "github-unavailable-metric",
+      "question": "Как рассчитывается отчёт GitHub, если необязательный источник данных, например workflow runs, недоступен?",
+      "status": "answered",
+      "answer": "Зависимая метрика получает unavailable и предупреждение, отсутствующие данные не подменяются нулём, остальные метрики продолжают рассчитываться, а неполнота отражается в Data coverage и Warnings.",
+      "has_sources": true,
+      "has_quotes": true,
+      "citations_valid": true,
+      "metadata_valid": true,
+      "quotes_exact": true,
+      "generation_requests": 1,
+      "repair_requests": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "duration_ms": null,
+      "semantic_match": "да",
+      "semantic_comment": "Цитаты подтверждают unavailable с предупреждением, продолжение остальных расчётов и явное различение недоступных данных.",
+      "sources": [
+        {
+          "source": "openspec/specs/github-project-reporting/spec.md",
+          "section": "github-project-reporting Specification > Requirements > Requirement: Derived metrics are deterministic and transparent > Scenario: Optional source is unavailable",
+          "chunk_id": "8be208420c77e5c794fc4f560da3101c42fb44dd72f367d01e82fd028c91c34d",
+          "quote": "- **WHEN** часть данных, например workflow runs, недоступна\n- **THEN** соответствующая метрика имеет значение unavailable и сопровождается предупреждением, а остальные метрики рассчитываются"
+        },
+        {
+          "source": "openspec/specs/github-project-reporting/spec.md",
+          "section": "github-project-reporting Specification > Requirements > Requirement: GitHub report is rendered from structured metrics",
+          "chunk_id": "2cd9368349a1a49ebbe5ced10d50820964059c69b72515710ecdac2a301aa94b",
+          "quote": "Система SHALL предоставлять read-only MCP-инструмент, который преобразует metadata, исходную activity и рассчитанные метрики в Markdown с разделами Overview, Development, Collaboration, Delivery, Data coverage и Warnings. Отчёт MUST показывать исходные счётчики рядом с производными значениями, различать полученные, рассчитанные, усечённые и недоступные данные и MUST NOT включать произвольные секреты или содержимое локальных файлов."
+        }
+      ]
+    },
+    {
+      "id": "calendar-ambiguous-read-target",
+      "question": "Можно ли читать и объединять события, если CalDAV обнаружил несколько доступных календарей, а целевой календарь явно не выбран?",
+      "status": "answered",
+      "answer": "Нет: чтение завершается ошибкой, система не выбирает календарь произвольно и не объединяет личные данные; результат просит выбрать целевой календарь.",
+      "has_sources": true,
+      "has_quotes": true,
+      "citations_valid": true,
+      "metadata_valid": true,
+      "quotes_exact": true,
+      "generation_requests": 1,
+      "repair_requests": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "duration_ms": null,
+      "semantic_match": "да",
+      "semantic_comment": "Цитаты прямо подтверждают ошибку при неоднозначности, запрет объединения и безопасную инструкцию выбора.",
+      "sources": [
+        {
+          "source": "openspec/specs/yandex-calendar-events/spec.md",
+          "section": "Requirements > Requirement: Digest reads use the explicitly selected calendar",
+          "chunk_id": "2045e029628eebccfe098a9fbf314e20e89ae0a1a02a38f900e423c329d9224a",
+          "quote": "Чтение событий SHALL применять тот же безопасный выбор календаря, что и запись: использовать единственный доступный календарь либо однозначное совпадение с локально настроенным именем. При нескольких доступных календарях без настройки система MUST завершить чтение ошибкой и MUST NOT объединять личные данные из произвольных календарей."
+        },
+        {
+          "source": "openspec/specs/yandex-calendar-events/spec.md",
+          "section": "Requirements > Requirement: Digest reads use the explicitly selected calendar > Scenario: Several calendars are ambiguous",
+          "chunk_id": "3fbda2f61b2156d6e665b38778ff30f8652293060bc552c82869de5fa9f6429d",
+          "quote": "- **WHEN** доступно несколько календарей и целевое имя не настроено\n- **THEN** чтение не выполняется, а результат содержит безопасную инструкцию выбрать календарь"
+        },
+        {
+          "source": "openspec/specs/yandex-calendar-events/spec.md",
+          "section": "Requirements > Requirement: Digest reads use the explicitly selected calendar > Scenario: One calendar is available",
+          "chunk_id": "a58ea1cb3a4a7479f0b67c993343a38945cb9f3f1e6bec182efe6c2e91066b2a",
+          "quote": "- **WHEN** CalDAV discovery возвращает ровно один доступный календарь\n- **THEN** события читаются из него без дополнительной настройки"
+        }
+      ]
+    }
+  ]
+}

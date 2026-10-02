@@ -1,0 +1,72 @@
+[
+  {
+    "id": "mcp-new-tool-default",
+    "question": "Что происходит с новым инструментом после очередного tools/list, когда его начинает объявлять уже зарегистрированный сервер MCP?",
+    "expectation": "Новый инструмент автоматически становится доступен агенту, если пользователь явно не отключил его; отключённые нативные имена хранятся в denylist конкретного сервера.",
+    "required_fact_fragments": ["автоматичес", "denylist", "отключ"],
+    "expected_sources": ["openspec/specs/mcp-tool-management/spec.md"]
+  },
+  {
+    "id": "invariant-verifier-outcomes",
+    "question": "Какие четыре исхода может вернуть отдельная проверка глобальных инвариантов и при каких исходах черновик ответа разрешено принять?",
+    "expectation": "Проверка возвращает allow, compliant_refusal, violation или uncertain; принять черновик можно только при allow или compliant_refusal.",
+    "required_fact_fragments": ["allow", "compliant_refusal", "violation", "uncertain"],
+    "expected_sources": ["openspec/specs/global-invariants/spec.md"]
+  },
+  {
+    "id": "isolated-ai-context",
+    "question": "Какие данные и возможности запрещено передавать модельному запросу инструмента ai.generate_text кроме его инструкций и входа текущего вызова, включая инструменты MCP?",
+    "expectation": "Изолированный запрос не получает интерактивную историю, профиль, долговременную память, активную задачу, MCP-инструменты и право выполнять внешние действия.",
+    "required_fact_fragments": ["истори", "профил", "памят", "mcp"],
+    "expected_sources": ["openspec/specs/isolated-ai-processing/spec.md"]
+  },
+  {
+    "id": "mcp-safe-lifecycle-logs",
+    "question": "Какие данные обязаны содержать логи жизненного цикла локального вызова MCP и какие данные полезной нагрузки они по умолчанию раскрывать не должны?",
+    "expectation": "Логи содержат correlation ID, server ID, имя инструмента, при наличии ID шага, статус и длительность; полные аргументы, результаты и credentials в них не попадают.",
+    "required_fact_fragments": ["correlation id", "server id", "длительн", "аргумент", "результат"],
+    "expected_sources": ["openspec/specs/mcp-call-observability/spec.md"]
+  },
+  {
+    "id": "pipeline-middle-step-failure",
+    "question": "Как должен завершиться pipeline при ошибке промежуточного шага и выполняется ли автоматический rollback уже совершённых действий?",
+    "expectation": "Pipeline получает статус failed, последующие шаги не вызываются и отмечаются skipped, выполненные действия остаются в trace, автоматический rollback запрещён.",
+    "required_fact_fragments": ["failed", "skipped", "rollback"],
+    "expected_sources": ["openspec/specs/mcp-pipeline-execution/spec.md"]
+  },
+  {
+    "id": "scheduled-job-change-approval",
+    "question": "Нужно ли заново подтверждать сохранённое задание orchestrator, если меняется его расписание, шаг, инструмент или аргумент?",
+    "expectation": "Да. Первое подтверждение разрешает только неизменяемый сохранённый pipeline; любое изменение расписания или структуры требует нового предварительного просмотра и подтверждения.",
+    "required_fact_fragments": ["неизменяем", "нов", "подтвержден"],
+    "expected_sources": ["openspec/specs/scheduled-pipeline-jobs/spec.md"]
+  },
+  {
+    "id": "telegram-fixed-destination",
+    "question": "Какие аргументы принимает telegram.send_message и откуда должны браться Bot token и chat ID?",
+    "expectation": "Инструмент принимает только непустой текст в установленном пределе, а Bot token и chat ID загружаются из локальной конфигурации сервера и не принимаются как аргументы.",
+    "required_fact_fragments": ["текст", "token", "chat id", "локальн"],
+    "expected_sources": ["openspec/specs/telegram-message-delivery/spec.md"]
+  },
+  {
+    "id": "embedding-cache-and-failure",
+    "question": "По какому ключу индексатор переиспользует embeddings и что остаётся доступным, если повторная индексация завершается ошибкой?",
+    "expectation": "Совместимый embedding ищется по хешу нормализованного текста, модели и размерности; при сбое последний успешный индекс каждой стратегии остаётся доступным без частичной замены.",
+    "required_fact_fragments": ["хеш", "модел", "размерност", "последн"],
+    "expected_sources": ["openspec/specs/document-indexing/spec.md"]
+  },
+  {
+    "id": "github-unavailable-metric",
+    "question": "Как рассчитывается отчёт GitHub, если необязательный источник данных, например workflow runs, недоступен?",
+    "expectation": "Зависимая метрика помечается unavailable и получает предупреждение, отсутствующие данные не заменяются нулём, а остальные метрики продолжают рассчитываться.",
+    "required_fact_fragments": ["unavailable", "предупрежден", "нул", "остальн"],
+    "expected_sources": ["openspec/specs/github-project-reporting/spec.md"]
+  },
+  {
+    "id": "calendar-ambiguous-read-target",
+    "question": "Можно ли читать и объединять события, если CalDAV обнаружил несколько доступных календарей, а целевой календарь явно не выбран?",
+    "expectation": "Нет: чтение завершается ошибкой с инструкцией выбрать календарь; система не выбирает первый и не объединяет личные данные из произвольных календарей.",
+    "required_fact_fragments": ["не", "выбрать календар", "объедин"],
+    "expected_sources": ["openspec/specs/yandex-calendar-events/spec.md"]
+  }
+]
