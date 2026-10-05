@@ -411,9 +411,9 @@ fn prepare_ai_messages(request: &GenerateTextRequest) -> Result<Vec<Message>> {
     }])
 }
 
-fn safe_ai_error(error: anyhow::Error, api_key: &str) -> rmcp::ErrorData {
+fn safe_ai_error(error: anyhow::Error, api_key: Option<&str>) -> rmcp::ErrorData {
     let message = error.to_string();
-    if !api_key.is_empty() && message.contains(api_key) {
+    if api_key.is_some_and(|api_key| !api_key.is_empty() && message.contains(api_key)) {
         return rmcp::ErrorData::internal_error("ошибка AI-провайдера", None);
     }
     tool_error(error)
@@ -439,7 +439,7 @@ impl AiServer {
             &RequestOptions::default(),
         )
         .await
-        .map_err(|error| safe_ai_error(error, &self.settings.api_key))?;
+        .map_err(|error| safe_ai_error(error, self.settings.api_key.as_deref()))?;
         if !answer.tool_calls.is_empty() {
             return Err(rmcp::ErrorData::internal_error(
                 "AI-сервер получил tool call",
@@ -681,7 +681,7 @@ mod tests {
 
         let settings = isolated_ai_settings(AgentSettings {
             provider: Provider::Openai,
-            api_key: "sk-private-marker".into(),
+            api_key: Some("sk-private-marker".into()),
             model: "test".into(),
             temperature: 0.0,
             instructions: Some("история пользователя".into()),
@@ -694,8 +694,20 @@ mod tests {
         );
         let error = safe_ai_error(
             anyhow!("provider rejected sk-private-marker"),
-            &settings.api_key,
+            settings.api_key.as_deref(),
         );
         assert!(!error.message.contains("sk-private-marker"));
+
+        let config = Config {
+            last_provider: Some(Provider::Ollama),
+            ..Config::default()
+        };
+        let server = AiServer::from_config(&config).unwrap();
+        assert_eq!(server.settings.provider, Provider::Ollama);
+        assert_eq!(server.settings.api_key, None);
+        assert_eq!(
+            server.settings.instructions.as_deref(),
+            Some(AI_SYSTEM_INSTRUCTIONS)
+        );
     }
 }

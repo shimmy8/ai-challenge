@@ -28,6 +28,7 @@ pub(crate) async fn send_request(
     match settings.provider {
         Provider::Openai => send_openai(client, settings, history, options).await,
         Provider::Claude => send_claude(client, settings, history, options).await,
+        Provider::Ollama => send_ollama(client, settings, history, options).await,
     }
 }
 
@@ -37,21 +38,40 @@ pub(crate) async fn send_openai(
     history: &[Message],
     options: &RequestOptions,
 ) -> Result<ApiAnswer> {
-    let payload = build_openai_payload_with_options(settings, history, options);
-    let response = client
-        .post("https://api.openai.com/v1/responses")
-        .bearer_auth(&settings.api_key)
-        .json(&payload)
+    send_responses_api(client, settings, history, options).await
+}
+
+pub(crate) async fn send_ollama(
+    client: &Client,
+    settings: &AgentSettings,
+    history: &[Message],
+    options: &RequestOptions,
+) -> Result<ApiAnswer> {
+    send_responses_api(client, settings, history, options).await
+}
+
+async fn send_responses_api(
+    client: &Client,
+    settings: &AgentSettings,
+    history: &[Message],
+    options: &RequestOptions,
+) -> Result<ApiAnswer> {
+    let payload = build_responses_payload_with_options(settings, history, options);
+    let response = build_responses_request(client, settings, &payload)?
         .send()
         .await
-        .context("не удалось подключиться к OpenAI")?;
-    let (status, body) = read_response(response).await?;
-    ensure_success(status, &body, "OpenAI")?;
-    let text = extract_openai_text_optional(&body)?;
-    let tool_calls = extract_openai_tool_calls(&body)?;
+        .with_context(|| responses_connection_error(settings.provider))?;
+    let body = read_responses_response(response, settings).await?;
+    parse_responses_answer(settings, &body)
+}
+
+pub(crate) fn parse_responses_answer(settings: &AgentSettings, body: &Value) -> Result<ApiAnswer> {
+    let text = extract_responses_text_optional(body)?;
+    let tool_calls = extract_responses_tool_calls(body)?;
     anyhow::ensure!(
         !text.trim().is_empty() || !tool_calls.is_empty(),
-        "OpenAI не вернул текст или tool call"
+        "{} не вернул текст или tool call",
+        settings.provider
     );
     let input_tokens = body
         .pointer("/usage/input_tokens")
@@ -76,12 +96,124 @@ pub(crate) async fn send_openai(
     })
 }
 
-#[allow(dead_code)]
-pub(crate) fn build_openai_payload(settings: &AgentSettings, history: &[Message]) -> Value {
-    build_openai_payload_with_options(settings, history, &RequestOptions::default())
+pub(crate) fn responses_endpoint(provider: Provider) -> Result<&'static str> {
+    match provider {
+        Provider::Openai => Ok("https://api.openai.com/v1/responses"),
+        Provider::Ollama => Ok(OLLAMA_RESPONSES_URL),
+        Provider::Claude => bail!("Claude не использует Responses API"),
+    }
 }
 
+pub(crate) fn build_responses_request(
+    client: &Client,
+    settings: &AgentSettings,
+    payload: &Value,
+) -> Result<reqwest::RequestBuilder> {
+    let mut request = client
+        .post(responses_endpoint(settings.provider)?)
+        .json(payload);
+    if settings.provider.requires_api_key() {
+        let api_key = settings
+            .api_key
+            .as_deref()
+            .ok_or_else(|| anyhow!("нет ключа {}", settings.provider))?;
+        request = request.bearer_auth(api_key);
+    }
+    Ok(request)
+}
+
+pub(crate) fn responses_connection_error(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Openai => "не удалось подключиться к OpenAI",
+        Provider::Ollama => "Ollama недоступна: запустите локальный сервер Ollama",
+        Provider::Claude => "не удалось подключиться к Anthropic",
+    }
+}
+
+async fn read_responses_response(
+    response: reqwest::Response,
+    settings: &AgentSettings,
+) -> Result<Value> {
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .context("не удалось прочитать ответ API")?;
+    let body: Value = serde_json::from_str(&text).map_err(|_| {
+        if settings.provider == Provider::Ollama {
+            anyhow!(
+                "Ollama вернула несовместимый ответ; обновите Ollama до версии с Responses API (0.13.3 или новее)"
+            )
+        } else {
+            anyhow!("API вернул не JSON: {}", truncate(&text, 300))
+        }
+    })?;
+    ensure_responses_success(status, &body, settings)?;
+    Ok(body)
+}
+
+pub(crate) fn ensure_responses_success(
+    status: StatusCode,
+    body: &Value,
+    settings: &AgentSettings,
+) -> Result<()> {
+    if status.is_success() {
+        return Ok(());
+    }
+    if settings.provider != Provider::Ollama {
+        return ensure_success(status, body, &settings.provider.to_string());
+    }
+    let message = api_error_message(body);
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("model")
+        && (normalized.contains("not found")
+            || normalized.contains("not exist")
+            || normalized.contains("pull"))
+    {
+        bail!(
+            "модель Ollama '{}' не установлена; выполните `ollama pull {}` или выберите установленную модель",
+            settings.model,
+            settings.model
+        );
+    }
+    if status == StatusCode::NOT_FOUND {
+        bail!("Ollama не поддерживает Responses API; обновите Ollama до версии 0.13.3 или новее");
+    }
+    bail!(
+        "Ollama вернула {status}: {}",
+        redact_secret(message, settings.api_key.as_deref())
+    )
+}
+
+fn api_error_message(body: &Value) -> &str {
+    body.pointer("/error/message")
+        .and_then(Value::as_str)
+        .or_else(|| body.get("error").and_then(Value::as_str))
+        .unwrap_or("неизвестная ошибка API")
+}
+
+fn redact_secret<'a>(message: &'a str, secret: Option<&str>) -> Cow<'a, str> {
+    match secret.filter(|secret| !secret.is_empty() && message.contains(secret)) {
+        Some(secret) => Cow::Owned(message.replace(secret, "[скрыто]")),
+        None => Cow::Borrowed(message),
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn build_openai_payload(settings: &AgentSettings, history: &[Message]) -> Value {
+    build_responses_payload_with_options(settings, history, &RequestOptions::default())
+}
+
+#[allow(dead_code)]
 pub(crate) fn build_openai_payload_with_options(
+    settings: &AgentSettings,
+    history: &[Message],
+    options: &RequestOptions,
+) -> Value {
+    build_responses_payload_with_options(settings, history, options)
+}
+
+pub(crate) fn build_responses_payload_with_options(
     settings: &AgentSettings,
     history: &[Message],
     options: &RequestOptions,
@@ -126,7 +258,9 @@ pub(crate) fn build_openai_payload_with_options(
                 .collect(),
         );
     }
-    if supports_temperature_with_reasoning_none(&settings.model) {
+    if settings.provider == Provider::Ollama
+        || supports_temperature_with_reasoning_none(&settings.model)
+    {
         payload["reasoning"] = json!({ "effort": "none" });
     }
     if let Some(instructions) = &settings.instructions {
@@ -149,9 +283,13 @@ pub(crate) async fn send_claude(
     options: &RequestOptions,
 ) -> Result<ApiAnswer> {
     let payload = build_claude_payload_with_options(settings, history, options);
+    let api_key = settings
+        .api_key
+        .as_deref()
+        .ok_or_else(|| anyhow!("нет ключа Claude"))?;
     let response = client
         .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", &settings.api_key)
+        .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
         .json(&payload)
         .send()
@@ -266,23 +404,20 @@ pub(crate) fn ensure_success(status: StatusCode, body: &Value, provider: &str) -
     if status.is_success() {
         return Ok(());
     }
-    let message = body
-        .pointer("/error/message")
-        .and_then(Value::as_str)
-        .unwrap_or("неизвестная ошибка API");
+    let message = api_error_message(body);
     bail!("{provider} вернул {status}: {message}")
 }
 
 #[allow(dead_code)]
 pub(crate) fn extract_openai_text(body: &Value) -> Result<String> {
-    let text = extract_openai_text_optional(body)?;
+    let text = extract_responses_text_optional(body)?;
     if text.trim().is_empty() {
         bail!("OpenAI не вернул текст");
     }
     Ok(text)
 }
 
-fn extract_openai_text_optional(body: &Value) -> Result<String> {
+fn extract_responses_text_optional(body: &Value) -> Result<String> {
     let parts = body
         .get("output")
         .and_then(Value::as_array)
@@ -318,7 +453,12 @@ fn extract_claude_text_optional(body: &Value) -> Result<String> {
     Ok(parts.collect::<Vec<_>>().join("\n"))
 }
 
+#[allow(dead_code)]
 pub(crate) fn extract_openai_tool_calls(body: &Value) -> Result<Vec<ToolCall>> {
+    extract_responses_tool_calls(body)
+}
+
+pub(crate) fn extract_responses_tool_calls(body: &Value) -> Result<Vec<ToolCall>> {
     body.get("output")
         .and_then(Value::as_array)
         .into_iter()
@@ -329,17 +469,18 @@ pub(crate) fn extract_openai_tool_calls(body: &Value) -> Result<Vec<ToolCall>> {
                 .get("call_id")
                 .or_else(|| item.get("id"))
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("OpenAI tool call не содержит call_id"))?;
+                .ok_or_else(|| anyhow!("Responses API tool call не содержит call_id"))?;
             let name = item
                 .get("name")
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("OpenAI tool call не содержит name"))?;
+                .ok_or_else(|| anyhow!("Responses API tool call не содержит name"))?;
             let raw = item
                 .get("arguments")
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("OpenAI tool call не содержит arguments"))?;
-            let arguments = serde_json::from_str(raw)
-                .with_context(|| format!("OpenAI tool call {name} содержит неверный JSON"))?;
+                .ok_or_else(|| anyhow!("Responses API tool call не содержит arguments"))?;
+            let arguments = serde_json::from_str(raw).with_context(|| {
+                format!("Responses API tool call {name} содержит неверный JSON")
+            })?;
             Ok(ToolCall {
                 id: id.to_owned(),
                 name: name.to_owned(),

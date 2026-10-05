@@ -881,7 +881,7 @@ mod tests {
         });
         let settings = AgentSettings {
             provider: Provider::Openai,
-            api_key: "fake".into(),
+            api_key: Some("fake".into()),
             model: "fake".into(),
             temperature: 0.0,
             instructions: None,

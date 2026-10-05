@@ -166,7 +166,7 @@ pub(crate) struct StatusBar<'a> {
     pub(crate) memory: &'a ActiveMemory,
 }
 
-pub(crate) fn show_status_bar(status_bar: StatusBar<'_>) -> Result<()> {
+pub(crate) fn status_prompt(status_bar: StatusBar<'_>) -> String {
     let compression = if status_bar.strategy == CompressionStrategy::Branching {
         format!(
             "{}:{}",
@@ -211,9 +211,8 @@ pub(crate) fn show_status_bar(status_bar: StatusBar<'_>) -> Result<()> {
             .map(|name| style(name).cyan().bold().to_string())
             .unwrap_or_default(),
     );
-    // Draw the status one row below the input, then return the cursor to the
-    // input row. It is erased as soon as readline finishes, so completed
-    // prompts do not leave repeated status lines in terminal scrollback.
+    // Keep the status inside rustyline's prompt so the editor accounts for its
+    // rows while redrawing pasted or wrapped multiline input.
     let width = usize::from(Term::stdout().size().1).saturating_sub(1);
     let status = console::truncate_str(&status, width, "…");
     if let (Some(task), Some(phase)) = (task, active_task_phase_line(status_bar.memory, false)) {
@@ -224,35 +223,18 @@ pub(crate) fn show_status_bar(status_bar: StatusBar<'_>) -> Result<()> {
         );
         let status = console::truncate_str(&status, width, "…");
         let phase = console::truncate_str(&phase, width, "…");
-        print!("{}", status_render_sequence(Some(&phase), &status));
+        status_prompt_sequence(Some(&phase), &status)
     } else {
-        print!("{}", status_render_sequence(None, &status));
+        status_prompt_sequence(None, &status)
     }
-    std::io::stdout().flush()?;
-    Ok(())
 }
 
-pub(crate) fn status_render_sequence(phase: Option<&str>, status: &str) -> String {
+pub(crate) fn status_prompt_sequence(phase: Option<&str>, status: &str) -> String {
+    let input = format!("{} ", style("Вы ›").green().bold());
     phase.map_or_else(
-        || format!("\n\x1b[2K{status}\x1b[1A\r"),
-        |phase| format!("\n\x1b[2K{phase}\n\x1b[2K{status}\x1b[2A\r"),
+        || format!("{status}\n{input}"),
+        |phase| format!("{phase}\n{status}\n{input}"),
     )
-}
-
-pub(crate) fn clear_status_bar(has_task: bool) -> Result<()> {
-    // Enter leaves the cursor on the status row. Clear it before printing the
-    // command result and reuse that row for normal output.
-    print!("{}", status_clear_sequence(has_task));
-    std::io::stdout().flush()?;
-    Ok(())
-}
-
-pub(crate) fn status_clear_sequence(has_task: bool) -> &'static str {
-    if has_task {
-        "\r\x1b[2K\x1b[1A\r\x1b[2K"
-    } else {
-        "\r\x1b[2K"
-    }
 }
 
 pub(crate) fn active_task_phase_line(memory: &ActiveMemory, force_color: bool) -> Option<String> {
@@ -587,7 +569,7 @@ pub(crate) fn temperature_maximum(provider: Provider, model: &str) -> f64 {
     match provider {
         Provider::Claude => 1.0,
         Provider::Openai if is_original_gpt5_model(model) => 1.0,
-        Provider::Openai => 2.0,
+        Provider::Openai | Provider::Ollama => 2.0,
     }
 }
 
@@ -623,7 +605,7 @@ pub(crate) async fn choose_model(
     println!("{}", style("Получаю список доступных моделей…").dim());
     let models = fetch_models(client, config, provider).await?;
     if models.is_empty() {
-        bail!("{provider} не вернул ни одной совместимой модели");
+        return Err(empty_models_error(provider));
     }
     let current = config.model(provider)?;
     let default = models
@@ -645,17 +627,26 @@ pub(crate) async fn fetch_models(
     config: &Config,
     provider: Provider,
 ) -> Result<Vec<String>> {
-    let response = match provider {
-        Provider::Openai => client
-            .get(OPENAI_MODELS_URL)
-            .bearer_auth(
-                config
-                    .key(provider)
-                    .ok_or_else(|| anyhow!("нет ключа OpenAI"))?,
-            )
-            .send()
-            .await
-            .context("не удалось получить модели OpenAI")?,
+    let response = build_models_request(client, config, provider)?
+        .send()
+        .await
+        .with_context(|| model_discovery_connection_error(provider))?;
+    let (status, body) = read_response(response).await?;
+    ensure_success(status, &body, &provider.to_string())?;
+    parse_model_ids(&body, provider)
+}
+
+pub(crate) fn build_models_request(
+    client: &Client,
+    config: &Config,
+    provider: Provider,
+) -> Result<reqwest::RequestBuilder> {
+    Ok(match provider {
+        Provider::Openai => client.get(OPENAI_MODELS_URL).bearer_auth(
+            config
+                .key(provider)
+                .ok_or_else(|| anyhow!("нет ключа OpenAI"))?,
+        ),
         Provider::Claude => client
             .get(CLAUDE_MODELS_URL)
             .query(&[("limit", 1000)])
@@ -665,14 +656,25 @@ pub(crate) async fn fetch_models(
                     .key(provider)
                     .ok_or_else(|| anyhow!("нет ключа Claude"))?,
             )
-            .header("anthropic-version", "2023-06-01")
-            .send()
-            .await
-            .context("не удалось получить модели Anthropic")?,
-    };
-    let (status, body) = read_response(response).await?;
-    ensure_success(status, &body, &provider.to_string())?;
-    parse_model_ids(&body, provider)
+            .header("anthropic-version", "2023-06-01"),
+        Provider::Ollama => client.get(OLLAMA_MODELS_URL),
+    })
+}
+
+pub(crate) fn model_discovery_connection_error(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Openai => "не удалось получить модели OpenAI",
+        Provider::Claude => "не удалось получить модели Anthropic",
+        Provider::Ollama => "Ollama недоступна: запустите локальный сервер Ollama",
+    }
+}
+
+pub(crate) fn empty_models_error(provider: Provider) -> anyhow::Error {
+    if provider == Provider::Ollama {
+        anyhow!("в Ollama нет установленных моделей; выполните `ollama pull qwen3.5:4b`")
+    } else {
+        anyhow!("{provider} не вернул ни одной совместимой модели")
+    }
 }
 
 pub(crate) fn parse_model_ids(body: &Value, provider: Provider) -> Result<Vec<String>> {
@@ -693,7 +695,7 @@ pub(crate) fn parse_model_ids(body: &Value, provider: Provider) -> Result<Vec<St
 }
 
 pub(crate) fn model_supports_responses_api(provider: Provider, model: &str) -> bool {
-    if provider == Provider::Claude {
+    if matches!(provider, Provider::Claude | Provider::Ollama) {
         return true;
     }
 
@@ -848,6 +850,9 @@ pub(crate) fn authorize_if_needed(
     provider: Provider,
     path: &Path,
 ) -> Result<()> {
+    if !provider.requires_api_key() {
+        return Ok(());
+    }
     if config.key(provider).is_some() {
         return Ok(());
     }
@@ -855,11 +860,14 @@ pub(crate) fn authorize_if_needed(
     let method = choose_auth_method()?;
     let prompt = match method {
         AuthMethod::CreateInWeb => {
+            let key_url = provider
+                .key_url()
+                .ok_or_else(|| anyhow!("для {provider} не требуется API-ключ"))?;
             println!(
                 "Открываю официальную страницу: {}",
-                style(provider.key_url()).underlined()
+                style(key_url).underlined()
             );
-            if webbrowser::open(provider.key_url()).is_err() {
+            if webbrowser::open(key_url).is_err() {
                 println!("Не удалось открыть браузер — перейдите по ссылке вручную.");
             }
             "Вставьте созданный ключ (ввод скрыт): "

@@ -181,9 +181,9 @@ mod tests {
     }
     fn settings() -> AgentSettings {
         AgentSettings {
-            provider: Provider::Openai,
-            api_key: "fake".into(),
-            model: "fake".into(),
+            provider: Provider::Ollama,
+            api_key: None,
+            model: "qwen3.5:4b".into(),
             temperature: 0.8,
             instructions: Some("Активный пользовательский режим".into()),
             compression_strategy: CompressionStrategy::Summary,
@@ -227,6 +227,8 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1.len(), 1);
         assert_eq!(calls[0].0.temperature, 0.0);
+        assert_eq!(calls[0].0.provider, Provider::Ollama);
+        assert_eq!(calls[0].0.api_key, None);
         assert_eq!(
             calls[0].0.instructions.as_deref(),
             Some(REWRITE_INSTRUCTIONS)
