@@ -953,6 +953,7 @@ pub(crate) fn provider_id(provider: Provider) -> &'static str {
     match provider {
         Provider::Openai => "openai",
         Provider::Claude => "claude",
+        Provider::Ollama => "ollama",
     }
 }
 
@@ -960,6 +961,7 @@ pub(crate) fn parse_provider(value: &str) -> Result<Provider> {
     match value {
         "openai" => Ok(Provider::Openai),
         "claude" => Ok(Provider::Claude),
+        "ollama" => Ok(Provider::Ollama),
         _ => bail!("неизвестный провайдер в сохранённой сессии: {value}"),
     }
 }

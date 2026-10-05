@@ -197,7 +197,7 @@ pub(crate) async fn run() -> Result<()> {
     editor.set_helper(Some(CommandHelper::new(branching_commands_enabled.clone())));
     'interactive: loop {
         let displayed_memory = agents.memory();
-        show_status_bar(StatusBar {
+        let prompt = status_prompt(StatusBar {
             provider,
             model: config.model(provider)?,
             mode: mode_name(&modes, active_mode),
@@ -213,10 +213,8 @@ pub(crate) async fn run() -> Result<()> {
                 }
             }),
             memory: &displayed_memory,
-        })?;
-        let prompt = format!("{} ", style("Вы ›").green().bold());
+        });
         let readline_result = editor.readline(&prompt);
-        clear_status_bar(displayed_memory.task.is_some())?;
         let input = match readline_result {
             Ok(value) => value.trim().to_owned(),
             Err(ReadlineError::Interrupted | ReadlineError::Eof) => break,

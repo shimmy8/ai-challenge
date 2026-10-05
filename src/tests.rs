@@ -338,6 +338,99 @@ mod suite {
     }
 
     #[test]
+    fn ollama_responses_request_is_local_keyless_and_provider_neutral() {
+        let mut settings = test_agent_settings();
+        settings.provider = Provider::Ollama;
+        settings.api_key = None;
+        settings.model = "qwen3.5:4b".into();
+        let options = RequestOptions {
+            tools: vec![ToolDefinition {
+                name: "calendar__list_events".into(),
+                description: Some("Список событий".into()),
+                input_schema: json!({"type": "object"}),
+                read_only: true,
+                destructive: false,
+            }],
+            ..RequestOptions::default()
+        };
+        let payload = build_responses_payload_with_options(
+            &settings,
+            &[Message {
+                role: "user".into(),
+                content: "Покажи события".into(),
+            }],
+            &options,
+        );
+        let request = build_responses_request(&Client::new(), &settings, &payload)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.url().as_str(), OLLAMA_RESPONSES_URL);
+        assert!(!request
+            .headers()
+            .contains_key(reqwest::header::AUTHORIZATION));
+        assert_eq!(payload["model"], "qwen3.5:4b");
+        assert_eq!(payload["instructions"], "Отвечай кратко");
+        assert_eq!(payload["reasoning"]["effort"], "none");
+        assert_eq!(payload["tools"][0]["name"], "calendar__list_events");
+
+        let body = json!({
+            "output": [
+                {"content": [{"type": "output_text", "text": "Готово"}]},
+                {
+                    "type": "function_call",
+                    "call_id": "call-local",
+                    "name": "calendar__list_events",
+                    "arguments": "{}"
+                }
+            ],
+            "usage": {"input_tokens": 17, "output_tokens": 4}
+        });
+        let answer = parse_responses_answer(&settings, &body).unwrap();
+        assert_eq!(answer.text, "Готово");
+        assert_eq!(answer.input_tokens, 17);
+        assert_eq!(answer.output_tokens, 4);
+        assert_eq!(answer.tool_calls[0].id, "call-local");
+    }
+
+    #[test]
+    fn ollama_errors_distinguish_model_endpoint_and_redact_details() {
+        let mut settings = test_agent_settings();
+        settings.provider = Provider::Ollama;
+        settings.api_key = None;
+        settings.model = "missing:4b".into();
+        let missing = ensure_responses_success(
+            reqwest::StatusCode::NOT_FOUND,
+            &json!({"error": "model 'missing:4b' not found, try pulling it first"}),
+            &settings,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(missing.contains("ollama pull missing:4b"));
+
+        let unsupported = ensure_responses_success(
+            reqwest::StatusCode::NOT_FOUND,
+            &json!({"error": "route not found"}),
+            &settings,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(unsupported.contains("0.13.3"));
+
+        settings.api_key = Some("private-marker".into());
+        let other = ensure_responses_success(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({"error": "failed private-marker"}),
+            &settings,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!other.contains("private-marker"));
+        assert!(other.contains("[скрыто]"));
+        assert!(responses_connection_error(Provider::Ollama).contains("запустите"));
+    }
+
+    #[test]
     fn default_request_options_do_not_advertise_tools() {
         let options = RequestOptions::default();
         assert!(options.tools.is_empty());
@@ -388,7 +481,7 @@ mod suite {
 
     #[tokio::test]
     async fn both_provider_paths_execute_the_same_confirmed_tool_call() {
-        for provider in [Provider::Openai, Provider::Claude] {
+        for provider in [Provider::Openai, Provider::Claude, Provider::Ollama] {
             let client = ToolScriptClient::new(vec![
                 scripted_tool_answer(ToolCall {
                     id: format!("call-{provider:?}"),
@@ -1334,8 +1427,8 @@ mod suite {
             outcome: "success",
             branch: "variant-a",
             agent_id: 1,
-            provider: Provider::Openai,
-            model: "gpt-test",
+            provider: Provider::Ollama,
+            model: "qwen3.5:4b",
             elapsed_ms: 456,
             request_input_tokens: 10,
             request_output_tokens: 20,
@@ -1352,6 +1445,7 @@ mod suite {
         assert_eq!(value["session_id"], 42);
         assert_eq!(value["outcome"], "success");
         assert_eq!(value["branch"], "variant-a");
+        assert_eq!(value["provider"], "ollama");
         assert_eq!(value["request_input_tokens"], 10);
         assert_eq!(value["session_output_tokens"], 40);
     }
@@ -1375,10 +1469,12 @@ mod suite {
         assert_eq!(loaded.last_provider, Some(Provider::Claude));
         assert_eq!(loaded.key(Provider::Claude), Some("secret"));
         assert_eq!(loaded.model(Provider::Claude).unwrap(), "claude-test");
-        assert_eq!(loaded.providers.len(), 2);
+        assert_eq!(loaded.providers.len(), 3);
         assert_eq!(loaded.last_mode.as_deref(), Some("Кратко"));
         assert_eq!(loaded.temperature(Provider::Claude).unwrap(), 0.7);
         assert_eq!(loaded.temperature(Provider::Openai).unwrap(), 1.0);
+        assert_eq!(loaded.model(Provider::Ollama).unwrap(), "qwen3.5:4b");
+        assert_eq!(loaded.key(Provider::Ollama), None);
     }
 
     #[test]
@@ -1401,6 +1497,8 @@ mod suite {
         .unwrap();
         let old = Config::load(&old_path).unwrap();
         assert_eq!(old.mcp, McpConfig::default());
+        assert_eq!(old.providers.len(), 3);
+        assert_eq!(old.model(Provider::Ollama).unwrap(), "qwen3.5:4b");
 
         let path = dir.path().join("mcp-config.json");
         let config = Config {
@@ -1498,6 +1596,8 @@ mod suite {
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.key(Provider::Openai), Some("old-secret"));
         assert_eq!(loaded.model(Provider::Openai).unwrap(), "gpt-test");
+        assert_eq!(loaded.model(Provider::Ollama).unwrap(), "qwen3.5:4b");
+        assert_eq!(loaded.key(Provider::Ollama), None);
         assert_eq!(
             loaded.temperature(Provider::Openai).unwrap(),
             default_temperature()
@@ -1535,6 +1635,61 @@ mod suite {
             temperature_maximum(Provider::Claude, "claude-sonnet-5"),
             1.0
         );
+    }
+
+    #[test]
+    fn agent_settings_allow_keyless_ollama_but_require_cloud_keys() {
+        let mut config = Config::default();
+        let ollama = AgentSettings::from_config(&config, Provider::Ollama, None).unwrap();
+        assert_eq!(ollama.provider, Provider::Ollama);
+        assert_eq!(ollama.api_key, None);
+        assert_eq!(ollama.model, "qwen3.5:4b");
+
+        assert!(AgentSettings::from_config(&config, Provider::Openai, None).is_err());
+        assert!(AgentSettings::from_config(&config, Provider::Claude, None).is_err());
+        config.set_key(Provider::Openai, "cloud-key".into());
+        assert_eq!(
+            AgentSettings::from_config(&config, Provider::Openai, None)
+                .unwrap()
+                .api_key
+                .as_deref(),
+            Some("cloud-key")
+        );
+    }
+
+    #[test]
+    fn ollama_skips_authorization_and_preserves_cloud_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        let mut config = Config::default();
+        config.set_key(Provider::Openai, "openai-secret".into());
+        config.set_key(Provider::Claude, "claude-secret".into());
+
+        authorize_if_needed(&mut config, Provider::Ollama, &path).unwrap();
+
+        assert_eq!(config.key(Provider::Ollama), None);
+        assert_eq!(config.key(Provider::Openai), Some("openai-secret"));
+        assert_eq!(config.key(Provider::Claude), Some("claude-secret"));
+        assert!(!path.exists());
+        assert_eq!(Provider::all().len(), 3);
+        assert!(!Provider::Ollama.requires_api_key());
+        assert!(Provider::Ollama.key_url().is_none());
+    }
+
+    #[test]
+    fn switching_to_ollama_persists_provider_without_touching_cloud_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        let mut config = Config::default();
+        config.set_key(Provider::Openai, "openai-secret".into());
+        config.set_key(Provider::Claude, "claude-secret".into());
+        remember_provider(&mut config, Provider::Ollama, &path).unwrap();
+
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.last_provider, Some(Provider::Ollama));
+        assert_eq!(loaded.key(Provider::Openai), Some("openai-secret"));
+        assert_eq!(loaded.key(Provider::Claude), Some("claude-secret"));
+        assert!(AgentSettings::from_config(&loaded, Provider::Ollama, None).is_ok());
     }
 
     #[test]
@@ -1608,6 +1763,41 @@ mod suite {
             vec!["model-a".to_owned(), "model-z".to_owned()]
         );
         assert!(parse_model_ids(&json!({"models": []}), Provider::Openai).is_err());
+
+        let ollama = json!({
+            "data": [
+                {"id": "qwen3.5:4b"},
+                {"id": "local/custom-model:latest"},
+                {"id": "qwen3.5:4b"},
+                {"id": ""}
+            ]
+        });
+        assert_eq!(
+            parse_model_ids(&ollama, Provider::Ollama).unwrap(),
+            vec![
+                "local/custom-model:latest".to_owned(),
+                "qwen3.5:4b".to_owned()
+            ]
+        );
+        assert!(parse_model_ids(&json!({"data": []}), Provider::Ollama)
+            .unwrap()
+            .is_empty());
+
+        let config = Config::default();
+        let request = build_models_request(&Client::new(), &config, Provider::Ollama)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.url().as_str(), OLLAMA_MODELS_URL);
+        assert!(!request
+            .headers()
+            .contains_key(reqwest::header::AUTHORIZATION));
+        assert!(model_discovery_connection_error(Provider::Ollama).contains("запустите"));
+        let before = config.model(Provider::Ollama).unwrap().to_owned();
+        assert!(empty_models_error(Provider::Ollama)
+            .to_string()
+            .contains("ollama pull qwen3.5:4b"));
+        assert_eq!(config.model(Provider::Ollama).unwrap(), before);
     }
 
     #[test]
@@ -1649,12 +1839,17 @@ mod suite {
             normalized_temperature(Provider::Openai, "gpt-4.1", 1.7),
             1.7
         );
+        assert_eq!(temperature_maximum(Provider::Ollama, "qwen3.5:4b"), 2.0);
+        assert_eq!(
+            normalized_temperature(Provider::Ollama, "qwen3.5:4b", 1.7),
+            1.7
+        );
     }
 
     pub(crate) fn test_agent_settings() -> AgentSettings {
         AgentSettings {
             provider: Provider::Openai,
-            api_key: "test-key".into(),
+            api_key: Some("test-key".into()),
             model: "test-model".into(),
             temperature: 0.5,
             instructions: Some("Отвечай кратко".into()),
@@ -1939,7 +2134,7 @@ mod suite {
             .save(
                 None,
                 SessionSnapshot {
-                    provider: Provider::Openai,
+                    provider: Provider::Ollama,
                     model: "test-model",
                     mode: None,
                     temperature: 1.0,
@@ -1959,6 +2154,7 @@ mod suite {
             )
             .unwrap();
         let loaded = store.load(id).unwrap();
+        assert_eq!(loaded.provider, Provider::Ollama);
         assert_eq!(loaded.active_branch, "вариант A");
         assert!(!loaded.branch_pending);
         assert_eq!(loaded.branches.len(), 3);
@@ -3618,14 +3814,22 @@ mod suite {
         }
         assert!(active_task_phase_line(&memory, true).is_some());
         assert!(active_task_phase_line(&ActiveMemory::default(), true).is_none());
-        assert_eq!(status_clear_sequence(false), "\r\x1b[2K");
-        assert_eq!(status_clear_sequence(true), "\r\x1b[2K\x1b[1A\r\x1b[2K");
-        let two_lines = status_render_sequence(Some("Этап задачи: planning"), "Статус");
+    }
+
+    #[test]
+    fn status_prompt_leaves_multiline_layout_to_rustyline() {
+        let two_lines = status_prompt_sequence(Some("Этап задачи: planning"), "Статус");
         assert!(two_lines.find("Этап задачи").unwrap() < two_lines.find("Статус").unwrap());
-        assert!(two_lines.ends_with("\x1b[2A\r"));
-        let one_line = status_render_sequence(None, "Статус");
+        assert_eq!(two_lines.lines().count(), 3);
+        assert!(two_lines.ends_with("Вы › "));
+        assert!(!two_lines.contains("\x1b[2A"));
+        assert!(!two_lines.contains("\x1b[1A"));
+        assert!(!two_lines.contains("\x1b[2K"));
+
+        let one_line = status_prompt_sequence(None, "Статус");
         assert!(!one_line.contains("Этап задачи"));
-        assert!(one_line.ends_with("\x1b[1A\r"));
+        assert_eq!(one_line.lines().count(), 2);
+        assert!(one_line.ends_with("Вы › "));
     }
 
     #[test]
@@ -3965,7 +4169,7 @@ mod suite {
     }
 
     #[test]
-    fn invariant_prompt_is_global_and_precedes_profile_for_both_providers() {
+    fn invariant_prompt_is_global_and_precedes_profile_for_all_providers() {
         let mut pool = AgentPool::new(2, Client::new(), test_agent_settings());
         pool.set_invariants(sample_invariants());
         pool.set_memory(ActiveMemory {
@@ -3994,6 +4198,15 @@ mod suite {
             claude_settings.provider = Provider::Claude;
             let claude = build_claude_payload(&claude_settings, &[]);
             assert_eq!(openai["instructions"], claude["system"]);
+            let mut ollama_settings = settings;
+            ollama_settings.provider = Provider::Ollama;
+            ollama_settings.api_key = None;
+            let ollama = build_responses_payload_with_options(
+                &ollama_settings,
+                &[],
+                &RequestOptions::default(),
+            );
+            assert_eq!(openai["instructions"], ollama["instructions"]);
         }
         pool.reset();
         assert_eq!(pool.agents[0].invariants, sample_invariants());
@@ -4176,7 +4389,7 @@ mod suite {
 
     #[tokio::test]
     async fn selected_provider_is_used_for_main_and_verifier_calls() {
-        for provider in [Provider::Openai, Provider::Claude] {
+        for provider in [Provider::Openai, Provider::Claude, Provider::Ollama] {
             let checker = ScriptedClient::new(vec![
                 scripted_answer("Ответ на Rust"),
                 scripted_answer(r#"{"verdict":"allow","invariant_ids":[],"reason":""}"#),

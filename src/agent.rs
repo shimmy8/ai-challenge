@@ -197,7 +197,7 @@ pub(crate) struct MetricsLogEntry<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct AgentSettings {
     pub(crate) provider: Provider,
-    pub(crate) api_key: String,
+    pub(crate) api_key: Option<String>,
     pub(crate) model: String,
     pub(crate) temperature: f64,
     pub(crate) instructions: Option<String>,
@@ -211,12 +211,14 @@ impl AgentSettings {
         provider: Provider,
         mode: Option<&ResponseMode>,
     ) -> Result<Self> {
+        let api_key = config.key(provider).map(str::to_owned);
+        anyhow::ensure!(
+            !provider.requires_api_key() || api_key.is_some(),
+            "нет ключа {provider}"
+        );
         Ok(Self {
             provider,
-            api_key: config
-                .key(provider)
-                .ok_or_else(|| anyhow!("нет ключа {provider}"))?
-                .to_owned(),
+            api_key,
             model: config.model(provider)?.to_owned(),
             temperature: config.temperature(provider)?,
             compression_strategy: config.compression_strategy,

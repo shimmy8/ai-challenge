@@ -32,6 +32,8 @@ pub(crate) const OPENAI_KEYS_URL: &str = "https://platform.openai.com/api-keys";
 pub(crate) const CLAUDE_KEYS_URL: &str = "https://console.anthropic.com/settings/keys";
 pub(crate) const OPENAI_MODELS_URL: &str = "https://api.openai.com/v1/models";
 pub(crate) const CLAUDE_MODELS_URL: &str = "https://api.anthropic.com/v1/models";
+pub(crate) const OLLAMA_RESPONSES_URL: &str = "http://127.0.0.1:11434/v1/responses";
+pub(crate) const OLLAMA_MODELS_URL: &str = "http://127.0.0.1:11434/v1/models";
 pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("/provider", "сменить провайдера"),
     ("/model", "выбрать модель текущего провайдера"),
@@ -87,6 +89,7 @@ pub(crate) const FOX: &str = r#"
 pub(crate) enum Provider {
     Openai,
     Claude,
+    Ollama,
 }
 
 #[derive(Clone, Copy)]
@@ -96,13 +99,17 @@ pub(crate) enum AuthMethod {
 }
 
 impl Provider {
-    pub(crate) fn all() -> [Self; 2] {
-        [Self::Openai, Self::Claude]
+    pub(crate) fn all() -> [Self; 3] {
+        [Self::Openai, Self::Claude, Self::Ollama]
     }
-    pub(crate) fn key_url(self) -> &'static str {
+    pub(crate) fn requires_api_key(self) -> bool {
+        !matches!(self, Self::Ollama)
+    }
+    pub(crate) fn key_url(self) -> Option<&'static str> {
         match self {
-            Self::Openai => OPENAI_KEYS_URL,
-            Self::Claude => CLAUDE_KEYS_URL,
+            Self::Openai => Some(OPENAI_KEYS_URL),
+            Self::Claude => Some(CLAUDE_KEYS_URL),
+            Self::Ollama => None,
         }
     }
 }
@@ -112,6 +119,7 @@ impl fmt::Display for Provider {
         f.write_str(match self {
             Self::Openai => "OpenAI",
             Self::Claude => "Claude",
+            Self::Ollama => "Ollama",
         })
     }
 }
@@ -214,8 +222,25 @@ fn default_openai_model() -> String {
 fn default_claude_model() -> String {
     "claude-sonnet-5".into()
 }
+fn default_ollama_model() -> String {
+    "qwen3.5:4b".into()
+}
 pub(crate) fn default_temperature() -> f64 {
     1.0
+}
+
+fn default_provider_config(provider: Provider) -> ProviderConfig {
+    let model = match provider {
+        Provider::Openai => default_openai_model(),
+        Provider::Claude => default_claude_model(),
+        Provider::Ollama => default_ollama_model(),
+    };
+    ProviderConfig {
+        provider,
+        api_key: None,
+        model,
+        temperature: default_temperature(),
+    }
 }
 
 impl Default for Config {
@@ -226,20 +251,10 @@ impl Default for Config {
             last_provider: None,
             last_mode: None,
             mcp: McpConfig::default(),
-            providers: vec![
-                ProviderConfig {
-                    provider: Provider::Openai,
-                    api_key: None,
-                    model: default_openai_model(),
-                    temperature: default_temperature(),
-                },
-                ProviderConfig {
-                    provider: Provider::Claude,
-                    api_key: None,
-                    model: default_claude_model(),
-                    temperature: default_temperature(),
-                },
-            ],
+            providers: Provider::all()
+                .into_iter()
+                .map(default_provider_config)
+                .collect(),
         }
     }
 }
@@ -254,9 +269,10 @@ impl Config {
         let mut value: Value = serde_json::from_str(&raw).context("повреждён файл конфигурации")?;
         if value.get("providers").is_some() {
             value["mcp"] = json!({"servers": []});
-            let config: Self =
+            let mut config: Self =
                 serde_json::from_value(value).context("повреждён файл конфигурации")?;
             anyhow::ensure!(config.context_messages <= 1000, "размер окна вне диапазона");
+            config.ensure_provider_defaults();
             return Ok(config);
         }
         Self::load(path)
@@ -270,10 +286,15 @@ impl Config {
             .with_context(|| format!("не удалось прочитать {}", path.display()))?;
         let value: Value = serde_json::from_str(&raw).context("повреждён файл конфигурации")?;
         if value.get("providers").is_some() {
-            let config: Self =
+            let mut config: Self =
                 serde_json::from_value(value).context("повреждён файл конфигурации")?;
             anyhow::ensure!(config.context_messages <= 1000, "размер окна вне диапазона");
             config.mcp.validate()?;
+            if config.ensure_provider_defaults() {
+                config
+                    .save(path)
+                    .context("не удалось обновить список провайдеров")?;
+            }
             return Ok(config);
         }
 
@@ -298,6 +319,7 @@ impl Config {
                     model: legacy.claude_model,
                     temperature: default_temperature(),
                 },
+                default_provider_config(Provider::Ollama),
             ],
         };
         config
@@ -379,6 +401,17 @@ impl Config {
 
     pub(crate) fn provider(&self, provider: Provider) -> Option<&ProviderConfig> {
         self.providers.iter().find(|item| item.provider == provider)
+    }
+
+    fn ensure_provider_defaults(&mut self) -> bool {
+        let mut changed = false;
+        for provider in Provider::all() {
+            if self.provider(provider).is_none() {
+                self.providers.push(default_provider_config(provider));
+                changed = true;
+            }
+        }
+        changed
     }
 }
 

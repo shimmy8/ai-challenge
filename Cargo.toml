@@ -2,7 +2,7 @@
 name = "fox-llm"
 version = "0.1.0"
 edition = "2021"
-description = "A friendly interactive CLI for OpenAI and Claude"
+description = "A friendly interactive CLI for OpenAI, Claude, and local Ollama models"
 license = "MIT"
 
 [dependencies]
