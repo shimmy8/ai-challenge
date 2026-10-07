@@ -229,6 +229,7 @@ mod tests {
         assert_eq!(calls[0].0.temperature, 0.0);
         assert_eq!(calls[0].0.provider, Provider::Ollama);
         assert_eq!(calls[0].0.api_key, None);
+        assert_eq!(calls[0].0.model, "qwen3.5:4b");
         assert_eq!(
             calls[0].0.instructions.as_deref(),
             Some(REWRITE_INSTRUCTIONS)
