@@ -64,6 +64,7 @@ mod suite {
         responses: Mutex<VecDeque<anyhow::Result<ApiAnswer>>>,
         options: Mutex<Vec<RequestOptions>>,
         histories: Mutex<Vec<Vec<Message>>>,
+        settings: Mutex<Vec<AgentSettings>>,
     }
 
     impl ToolScriptClient {
@@ -72,6 +73,7 @@ mod suite {
                 responses: Mutex::new(responses.into()),
                 options: Mutex::new(Vec::new()),
                 histories: Mutex::new(Vec::new()),
+                settings: Mutex::new(Vec::new()),
             })
         }
     }
@@ -89,12 +91,13 @@ mod suite {
         fn send_with_options<'a>(
             &'a self,
             _client: &'a Client,
-            _settings: &'a AgentSettings,
+            settings: &'a AgentSettings,
             history: &'a [Message],
             options: &'a RequestOptions,
         ) -> RequestFuture<'a> {
             self.options.lock().unwrap().push(options.clone());
             self.histories.lock().unwrap().push(history.to_vec());
+            self.settings.lock().unwrap().push(settings.clone());
             let response = self.responses.lock().unwrap().pop_front().unwrap();
             Box::pin(async move { response })
         }
@@ -1855,6 +1858,15 @@ mod suite {
             instructions: Some("Отвечай кратко".into()),
             compression_strategy: CompressionStrategy::Summary,
             context_messages: default_context_messages(),
+        }
+    }
+
+    fn local_rag_settings() -> AgentSettings {
+        AgentSettings {
+            provider: Provider::Ollama,
+            api_key: None,
+            model: "qwen3.5:4b".into(),
+            ..test_agent_settings()
         }
     }
 
@@ -4579,7 +4591,7 @@ mod suite {
     #[tokio::test]
     async fn rag_answer_is_validated_before_history_and_disables_tools() {
         let client = ToolScriptClient::new(vec![scripted_answer(grounded_draft())]);
-        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        let mut agent = Agent::new(1, Client::new(), local_rag_settings());
         agent.request_client = client.clone();
         agent.set_tool_runtime(
             Some(Arc::new(RecordingExecutor {
@@ -4595,13 +4607,25 @@ mod suite {
             .unwrap();
 
         assert_eq!((answer.generation_requests, answer.repair_requests), (1, 0));
+        assert_eq!((answer.input_tokens, answer.output_tokens), (3, 2));
+        assert_eq!(
+            (answer.session_input_tokens, answer.session_output_tokens),
+            (3, 2)
+        );
         assert_eq!(answer.rag_citations.len(), 1);
+        assert_eq!(answer.rag_citations[0].source, "doc.md");
+        assert_eq!(answer.rag_citations[0].chunk_id, "chunk-1");
         assert!(answer.text.contains("Источники:"));
         assert!(!answer.text.contains("RAG_ATTRIBUTION"));
         assert_eq!(agent.persisted_history.len(), 2);
         assert_eq!(agent.persisted_history[0].content, "Вопрос");
         assert_eq!(agent.persisted_history[1].content, answer.text);
         assert!(client.options.lock().unwrap()[0].tools.is_empty());
+        let settings = client.settings.lock().unwrap();
+        assert_eq!(settings.len(), 1);
+        assert_eq!(settings[0].provider, Provider::Ollama);
+        assert_eq!(settings[0].model, "qwen3.5:4b");
+        assert_eq!(settings[0].api_key, None);
     }
 
     #[tokio::test]
@@ -4651,13 +4675,17 @@ mod suite {
             scripted_answer("невалидный draft"),
             scripted_answer(grounded_draft()),
         ]);
-        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        let mut agent = Agent::new(1, Client::new(), local_rag_settings());
         agent.request_client = client.clone();
         let answer = agent
             .ask_rag("Вопрос", "RAG prompt", &[rag_chunk()])
             .await
             .unwrap();
         assert_eq!((answer.input_tokens, answer.output_tokens), (6, 4));
+        assert_eq!(
+            (answer.session_input_tokens, answer.session_output_tokens),
+            (6, 4)
+        );
         assert_eq!((answer.generation_requests, answer.repair_requests), (2, 1));
         {
             let histories = client.histories.lock().unwrap();
@@ -4674,6 +4702,11 @@ mod suite {
             .unwrap()
             .iter()
             .all(|item| item.tools.is_empty()));
+        assert!(client.settings.lock().unwrap().iter().all(|settings| {
+            settings.provider == Provider::Ollama
+                && settings.model == "qwen3.5:4b"
+                && settings.api_key.is_none()
+        }));
 
         let failing = ToolScriptClient::new(vec![
             scripted_answer("первый невалидный"),
@@ -4694,6 +4727,9 @@ mod suite {
         assert_eq!(agent.active_branch, before_branch);
         assert_eq!(agent.branches.len(), before_branches);
         assert_eq!(failing.options.lock().unwrap().len(), 2);
+        assert!(failing.settings.lock().unwrap().iter().all(|settings| {
+            settings.provider == Provider::Ollama && settings.model == "qwen3.5:4b"
+        }));
 
         let provider_failure = ToolScriptClient::new(vec![
             scripted_answer("невалидный"),
@@ -4706,12 +4742,64 @@ mod suite {
             .is_err());
         assert_eq!(agent.persisted_history, before);
         assert_eq!(provider_failure.options.lock().unwrap().len(), 2);
+        assert!(provider_failure
+            .settings
+            .lock()
+            .unwrap()
+            .iter()
+            .all(
+                |settings| settings.provider == Provider::Ollama && settings.model == "qwen3.5:4b"
+            ));
+    }
+
+    #[tokio::test]
+    async fn rag_repair_recovers_local_model_rows_from_valid_context_markers() {
+        let malformed_repair = "Подтверждённый ответ [1].\n\n<RAG_ATTRIBUTION>\ncitations[2]{id,context_id,source,section,chunk_id,quote}:\n  1,\\\"doc.md\\\"\n</RAG_ATTRIBUTION>";
+        let client = ToolScriptClient::new(vec![
+            scripted_answer("невалидный draft"),
+            scripted_answer(malformed_repair),
+        ]);
+        let mut agent = Agent::new(1, Client::new(), local_rag_settings());
+        agent.request_client = client;
+
+        let answer = agent
+            .ask_rag("Вопрос", "RAG prompt", &[rag_chunk()])
+            .await
+            .unwrap();
+
+        assert_eq!((answer.generation_requests, answer.repair_requests), (2, 1));
+        assert_eq!(answer.rag_citations.len(), 1);
+        assert_eq!(answer.rag_citations[0].source, "doc.md");
+        assert_eq!(answer.rag_citations[0].quote, "Точная цитата из документа");
+        assert!(answer.text.contains("Источники:"));
+    }
+
+    #[tokio::test]
+    async fn rag_repair_falls_back_to_grounded_initial_draft_when_repair_is_truncated() {
+        let malformed_initial = "Первичный ответ [1].\n\n<TASK_UPDATE>\nслужебный текст\n</TASK_UPDATE>\n<RAG_ATTRIBUTION>\ncitations[N]{broken}\n</RAG_ATTRIBUTION>";
+        let client = ToolScriptClient::new(vec![
+            scripted_answer(malformed_initial),
+            scripted_answer("Оборванный repair без ссылок"),
+        ]);
+        let mut agent = Agent::new(1, Client::new(), local_rag_settings());
+        agent.request_client = client;
+
+        let answer = agent
+            .ask_rag("Вопрос", "RAG prompt", &[rag_chunk()])
+            .await
+            .unwrap();
+
+        assert_eq!((answer.generation_requests, answer.repair_requests), (2, 1));
+        assert_eq!(answer.rag_citations.len(), 1);
+        assert!(answer.text.contains("Первичный ответ [1]."));
+        assert!(!answer.text.contains("TASK_UPDATE"));
+        assert!(!answer.text.contains("Оборванный repair"));
     }
 
     #[tokio::test]
     async fn no_context_is_local_and_followup_can_use_grounded_generation() {
         let client = ToolScriptClient::new(vec![scripted_answer(grounded_draft())]);
-        let mut agent = Agent::new(1, Client::new(), test_agent_settings());
+        let mut agent = Agent::new(1, Client::new(), local_rag_settings());
         agent.request_client = client.clone();
         let local = agent
             .record_local_answer("Неясный вопрос", NO_RELEVANT_CONTEXT_ANSWER)
@@ -4720,6 +4808,8 @@ mod suite {
         assert!(local.text.contains("Не знаю"));
         assert!(local.text.contains("Источники"));
         assert!(local.rag_citations.is_empty());
+        assert_eq!((local.input_tokens, local.output_tokens), (0, 0));
+        assert_eq!((local.generation_requests, local.repair_requests), (0, 0));
         assert!(client.options.lock().unwrap().is_empty());
 
         let grounded = agent

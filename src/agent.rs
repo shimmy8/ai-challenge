@@ -530,16 +530,33 @@ impl Agent {
                 repaired.output_tokens += first_output_tokens;
                 repaired.generation_requests = 2;
                 repaired.repair_requests = 1;
-                let grounded = parse_grounded_answer(&repaired.text, chunks).map_err(|error| {
-                    log_rag_contract_failure(
-                        &contract_request_id,
-                        "repair",
-                        &error,
-                        &repaired.text,
-                        chunks,
-                    );
-                    anyhow!("RAG-ответ нарушил контракт ({})", error.code())
-                })?;
+                let grounded = match parse_repaired_grounded_answer(&repaired.text, chunks) {
+                    Ok(grounded) => grounded,
+                    Err(error) => {
+                        log_rag_contract_failure(
+                            &contract_request_id,
+                            "repair",
+                            &error,
+                            &repaired.text,
+                            chunks,
+                        );
+                        match recover_grounded_answer_from_markers(&repaired.text, chunks) {
+                            Ok(grounded) => grounded,
+                            Err(repair_fallback_error) => {
+                                recover_grounded_answer_from_markers(&answer.text, chunks).map_err(
+                                    |initial_fallback_error| {
+                                        anyhow!(
+                                            "RAG-ответ нарушил контракт ({}) и не восстановлен из repair ({}) или generation ({})",
+                                            error.code(),
+                                            repair_fallback_error.code(),
+                                            initial_fallback_error.code()
+                                        )
+                                    },
+                                )?
+                            }
+                        }
+                    }
+                };
                 answer = repaired;
                 grounded
             }
