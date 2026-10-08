@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 use crate::{
     agent::*, cli::*, config::*, mcp::*, memory::*, metrics::*, model::*, providers::*, rag::*,
-    sessions::*,
+    sessions::*, summarization::*,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use console::{style, Key, Term};
@@ -135,6 +135,9 @@ pub(crate) async fn run() -> Result<()> {
     }
     if let StartupMode::RagChatEval(options) = startup_mode {
         return run_rag_chat_evaluation(options).await;
+    }
+    if let StartupMode::SummarizeEval(options) = startup_mode {
+        return run_summarization_evaluation(options).await;
     }
     let StartupMode::Interactive { dump_metrics } = startup_mode else {
         unreachable!();
