@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "baseline",
+      "model": "fox-summary-baseline",
+      "temperature": 1.0,
+      "num_ctx": 4096,
+      "num_predict": 1024,
+      "prompt": "general",
+      "expected_base_model": "qwen3.5:4b",
+      "expected_quantization": "Q4_K_M"
+    },
+    {
+      "id": "compact",
+      "model": "fox-summary-compact",
+      "temperature": 0.0,
+      "num_ctx": 4096,
+      "num_predict": 256,
+      "prompt": "specialized",
+      "expected_base_model": "qwen3.5:4b",
+      "expected_quantization": "Q4_K_M"
+    },
+    {
+      "id": "balanced",
+      "model": "fox-summary-balanced",
+      "temperature": 0.2,
+      "num_ctx": 8192,
+      "num_predict": 512,
+      "prompt": "specialized",
+      "expected_base_model": "qwen3.5:4b",
+      "expected_quantization": "Q4_K_M"
+    }
+  ]
+}

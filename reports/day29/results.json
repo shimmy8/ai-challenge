@@ -1,0 +1,1155 @@
+{
+  "generated_at_unix_ms": 1791482074771,
+  "base_model": "qwen3.5:4b",
+  "quantization": "Q4_K_M",
+  "profiles": [
+    {
+      "id": "baseline",
+      "model": "fox-summary-baseline",
+      "temperature": 1.0,
+      "num_ctx": 4096,
+      "num_predict": 1024,
+      "prompt": "general",
+      "expected_base_model": "qwen3.5:4b",
+      "expected_quantization": "Q4_K_M"
+    },
+    {
+      "id": "compact",
+      "model": "fox-summary-compact",
+      "temperature": 0.0,
+      "num_ctx": 4096,
+      "num_predict": 256,
+      "prompt": "specialized",
+      "expected_base_model": "qwen3.5:4b",
+      "expected_quantization": "Q4_K_M"
+    },
+    {
+      "id": "balanced",
+      "model": "fox-summary-balanced",
+      "temperature": 0.2,
+      "num_ctx": 8192,
+      "num_predict": 512,
+      "prompt": "specialized",
+      "expected_base_model": "qwen3.5:4b",
+      "expected_quantization": "Q4_K_M"
+    }
+  ],
+  "cases": [
+    {
+      "scenario_id": "short-release-date",
+      "length_tier": "short",
+      "profile_id": "baseline",
+      "cold": true,
+      "answer": "{\n  \"summary\": \"Команда обсудила и отложила запланированный на пятницу выпуск версии из-за незавершённого тестирования. Вынос решение о переносе выпуска на понедельник, а также поручили Анне подготовить release notes до 12 октября 2026 года.\",\n  \"decisions\": [\n    {\n      \"id\": \"D1\",\n      \"description\": \"Выпуск версии состоится в понедельник\"\n    }\n  ],\n  \"action_items\": [\n    {\n      \"id\": \"A1\",\n      \"task\": \"подготовить release notes\",\n      \"owner\": \"Анна\",\n      \"deadline\": \"2026-10-12\"\n    }\n  ],\n  \"open_questions\": [],\n  \"risks\": []\n}",
+      "checks": {
+        "json_valid": false,
+        "decisions_ok": false,
+        "action_items_ok": false,
+        "owners_ok": false,
+        "deadlines_ok": false,
+        "open_questions_ok": false,
+        "risks_ok": false,
+        "superseded_facts_absent": false,
+        "unsupported_facts_absent": false,
+        "summary_length_ok": false
+      },
+      "performance": {
+        "elapsed_ms": 17152,
+        "input_tokens": 216,
+        "output_tokens": 184,
+        "output_tokens_per_second": 10.727611940298507,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 4096,
+        "model_size_bytes": 3181547355,
+        "loaded_memory_bytes": 3181547355,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": "ответ не соответствует JSON-контракту",
+      "passed": false
+    },
+    {
+      "scenario_id": "short-release-date",
+      "length_tier": "short",
+      "profile_id": "compact",
+      "cold": true,
+      "answer": "{\"summary\":\"Команда отменила запланированный выход версии в пятницу из-за незавершённого тестирования и перенесла его на понедельник. Был назначен ответственный за подготовку release notes.\", \"decisions\":[{\"id\":\"D1\",\"text\":\"Выпуск версии состоится в понедельник.\"}],\"action_items\":[{\"id\":\"A1\",\"task\":\"Подготовить release notes\",\"owner\":\"Анна\",\"deadline\":\"2026-10-12\"}],\"open_questions\":[],\"risks\":[]}",
+      "checks": {
+        "json_valid": true,
+        "decisions_ok": false,
+        "action_items_ok": true,
+        "owners_ok": true,
+        "deadlines_ok": true,
+        "open_questions_ok": true,
+        "risks_ok": true,
+        "superseded_facts_absent": true,
+        "unsupported_facts_absent": true,
+        "summary_length_ok": true
+      },
+      "performance": {
+        "elapsed_ms": 8277,
+        "input_tokens": 311,
+        "output_tokens": 107,
+        "output_tokens_per_second": 12.92738915065845,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": null,
+        "model_size_bytes": null,
+        "loaded_memory_bytes": null,
+        "quantization": null,
+        "unavailable": [
+          "профиль fox-summary-compact не найден среди загруженных моделей"
+        ]
+      },
+      "error": null,
+      "passed": false
+    },
+    {
+      "scenario_id": "short-release-date",
+      "length_tier": "short",
+      "profile_id": "balanced",
+      "cold": true,
+      "answer": "{\"summary\":\"Команда отменила запланированный выход версии в пятницу из-за незавершённого тестирования и перенесла его на понедельник. Был назначен ответственный за подготовку release notes.\", \"decisions\":[{\"id\":\"D1\",\"text\":\"Выпуск версии состоится в понедельник.\"}],\"action_items\":[{\"id\":\"A1\",\"task\":\"Подготовить release notes\",\"owner\":\"Анна\",\"deadline\":\"2026-10-12\"}],\"open_questions\":[],\"risks\":[]}",
+      "checks": {
+        "json_valid": true,
+        "decisions_ok": false,
+        "action_items_ok": true,
+        "owners_ok": true,
+        "deadlines_ok": true,
+        "open_questions_ok": true,
+        "risks_ok": true,
+        "superseded_facts_absent": true,
+        "unsupported_facts_absent": true,
+        "summary_length_ok": true
+      },
+      "performance": {
+        "elapsed_ms": 9876,
+        "input_tokens": 311,
+        "output_tokens": 107,
+        "output_tokens_per_second": 10.834345889023897,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 8192,
+        "model_size_bytes": 3335792884,
+        "loaded_memory_bytes": 3335792884,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": null,
+      "passed": false
+    },
+    {
+      "scenario_id": "short-missing-owner",
+      "length_tier": "short",
+      "profile_id": "compact",
+      "cold": false,
+      "answer": "{\"summary\":\"Команда проверила статусы задач, подтвердила решение по аудиту ошибок и назначила задачу по подготовке таблицы ошибок.\", \"decisions\":[{\"id\":\"D1\",\"text\":\"Включить аудит ошибок в следующий релиз.\"}],\"action_items\":[{\"id\":\"A1\",\"task\":\"Подготовить таблицу ошибок\",\"owner\":null,\"deadline\":\"2026-10-15\"}],\"open_questions\":[{\"id\":\"Q1\",\"text\":\"Кто возьмёт подготовку таблицы ошибок?\"}],\"risks\":[]}",
+      "checks": {
+        "json_valid": true,
+        "decisions_ok": false,
+        "action_items_ok": true,
+        "owners_ok": true,
+        "deadlines_ok": true,
+        "open_questions_ok": true,
+        "risks_ok": true,
+        "superseded_facts_absent": true,
+        "unsupported_facts_absent": true,
+        "summary_length_ok": true
+      },
+      "performance": {
+        "elapsed_ms": 10037,
+        "input_tokens": 295,
+        "output_tokens": 111,
+        "output_tokens_per_second": 11.05908139882435,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 4096,
+        "model_size_bytes": 3181547355,
+        "loaded_memory_bytes": 3181547355,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": null,
+      "passed": false
+    },
+    {
+      "scenario_id": "short-missing-owner",
+      "length_tier": "short",
+      "profile_id": "balanced",
+      "cold": false,
+      "answer": "{\"summary\":\"Команда проверила статусы задач и приняла решение по аудиту ошибок, назначив задачу по подготовке таблицы с неопределённым ответственным.\", \"decisions\":[{\"id\":\"D1\",\"text\":\"Включить аудит ошибок в следующий релиз.\"}],\"action_items\":[{\"id\":\"A1\",\"task\":\"Подготовить таблицу ошибок\",\"owner\":null,\"deadline\":\"2026-10-15\"}],\"open_questions\":[{\"id\":\"Q1\",\"text\":\"Кто возьмёт подготовку таблицы ошибок?\"}],\"risks\":[]}",
+      "checks": {
+        "json_valid": true,
+        "decisions_ok": false,
+        "action_items_ok": true,
+        "owners_ok": true,
+        "deadlines_ok": true,
+        "open_questions_ok": true,
+        "risks_ok": true,
+        "superseded_facts_absent": true,
+        "unsupported_facts_absent": true,
+        "summary_length_ok": true
+      },
+      "performance": {
+        "elapsed_ms": 10579,
+        "input_tokens": 295,
+        "output_tokens": 119,
+        "output_tokens_per_second": 11.24870025522261,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 8192,
+        "model_size_bytes": 3335792884,
+        "loaded_memory_bytes": 3335792884,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": null,
+      "passed": false
+    },
+    {
+      "scenario_id": "short-missing-owner",
+      "length_tier": "short",
+      "profile_id": "baseline",
+      "cold": false,
+      "answer": "{\n  \"summary\": \"Команда провела обзор статусов задач. Подтверждено решение по включению аудита ошибок в следующий релиз (D1). Указана задача по подготовке таблицы ошибок (A1) с назначенным сроком, однако ответственный не определен, что поднимает открытый вопрос Q1.\",\n  \"decisions\": [\n    {\n      \"id\": \"D1\",\n      \"description\": \"Подотверждено решение: включить аудит ошибок в следующий релиз.\"\n    }\n  ],\n  \"action_items\": [\n    {\n      \"id\": \"A1\",\n      \"task\": \"Подготовить таблицу ошибок\",\n      \"owner\": null,\n      \"deadline\": \"2026-10-15\"\n    }\n  ],\n  \"open_questions\": [\n    {\n      \"id\": \"Q1\",\n      \"question\": \"Кто возьмёт подготовку таблицы ошибок?\"\n    }\n  ],\n  \"risks\": []\n}",
+      "checks": {
+        "json_valid": false,
+        "decisions_ok": false,
+        "action_items_ok": false,
+        "owners_ok": false,
+        "deadlines_ok": false,
+        "open_questions_ok": false,
+        "risks_ok": false,
+        "superseded_facts_absent": false,
+        "unsupported_facts_absent": false,
+        "summary_length_ok": false
+      },
+      "performance": {
+        "elapsed_ms": 16662,
+        "input_tokens": 200,
+        "output_tokens": 225,
+        "output_tokens_per_second": 13.503781058696434,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 4096,
+        "model_size_bytes": 3181547355,
+        "loaded_memory_bytes": 3181547355,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": "ответ не соответствует JSON-контракту",
+      "passed": false
+    },
+    {
+      "scenario_id": "short-storage-change",
+      "length_tier": "short",
+      "profile_id": "balanced",
+      "cold": false,
+      "answer": "{\"summary\":\"В ходе встречи решение о базе данных было изменено из SQLite на PostgreSQL из-за требований совместного доступа, при этом выявлен риск задержки запуска.\", \"decisions\":[{\"id\":\"D0\",\"text\":\"Использовать SQLite\"},{\"id\":\"D1\",\"text\":\"Использовать PostgreSQL\"}],\"action_items\":[],\"open_questions\":[],\"risks\":[{\"id\":\"R1\",\"text\":\"Миграция может задержать запуск на один день.\"}]}",
+      "checks": {
+        "json_valid": true,
+        "decisions_ok": false,
+        "action_items_ok": true,
+        "owners_ok": true,
+        "deadlines_ok": true,
+        "open_questions_ok": true,
+        "risks_ok": false,
+        "superseded_facts_absent": false,
+        "unsupported_facts_absent": false,
+        "summary_length_ok": true
+      },
+      "performance": {
+        "elapsed_ms": 9122,
+        "input_tokens": 284,
+        "output_tokens": 97,
+        "output_tokens_per_second": 10.633632975224732,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 8192,
+        "model_size_bytes": 3335792884,
+        "loaded_memory_bytes": 3335792884,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": null,
+      "passed": false
+    },
+    {
+      "scenario_id": "short-storage-change",
+      "length_tier": "short",
+      "profile_id": "baseline",
+      "cold": false,
+      "answer": "{\n  \"summary\": \"После выяснения необходимости совместного доступа с нескольких серверов, решение о использовании SQLite было отменено и принято решение использовать PostgreSQL.\",\n  \"decisions\": [\n    {\n      \"id\": \"D1\",\n      \"description\": \"Использовать PostgreSQL\"\n    }\n  ],\n  \"action_items\": [],\n  \"open_questions\": [],\n  \"risks\": [\n    {\n      \"id\": \"R1\",\n      \"description\": \"Миграция может задержать запуск на один день\"\n    }\n  ]\n}",
+      "checks": {
+        "json_valid": false,
+        "decisions_ok": false,
+        "action_items_ok": false,
+        "owners_ok": false,
+        "deadlines_ok": false,
+        "open_questions_ok": false,
+        "risks_ok": false,
+        "superseded_facts_absent": false,
+        "unsupported_facts_absent": false,
+        "summary_length_ok": false
+      },
+      "performance": {
+        "elapsed_ms": 10589,
+        "input_tokens": 189,
+        "output_tokens": 131,
+        "output_tokens_per_second": 12.371328737368968,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 4096,
+        "model_size_bytes": 3181547355,
+        "loaded_memory_bytes": 3181547355,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": "ответ не соответствует JSON-контракту",
+      "passed": false
+    },
+    {
+      "scenario_id": "short-storage-change",
+      "length_tier": "short",
+      "profile_id": "compact",
+      "cold": false,
+      "answer": "{\"summary\":\"В ходе встречи решение о базе данных было изменено с SQLite на PostgreSQL из-за требований совместного доступа, при этом выявлен риск задержки запуска.\", \"decisions\":[{\"id\":\"D1\",\"text\":\"Использовать PostgreSQL вместо SQLite\"}],\"action_items\":[],\"open_questions\":[],\"risks\":[{\"id\":\"R1\",\"text\":\"Миграция может задержать запуск на один день\"}]}",
+      "checks": {
+        "json_valid": true,
+        "decisions_ok": false,
+        "action_items_ok": true,
+        "owners_ok": true,
+        "deadlines_ok": true,
+        "open_questions_ok": true,
+        "risks_ok": true,
+        "superseded_facts_absent": true,
+        "unsupported_facts_absent": true,
+        "summary_length_ok": true
+      },
+      "performance": {
+        "elapsed_ms": 6808,
+        "input_tokens": 284,
+        "output_tokens": 86,
+        "output_tokens_per_second": 12.632197414806111,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": null,
+        "model_size_bytes": null,
+        "loaded_memory_bytes": null,
+        "quantization": null,
+        "unavailable": [
+          "профиль fox-summary-compact не найден среди загруженных моделей"
+        ]
+      },
+      "error": null,
+      "passed": false
+    },
+    {
+      "scenario_id": "medium-api-launch",
+      "length_tier": "medium",
+      "profile_id": "baseline",
+      "cold": false,
+      "answer": "{\n  \"summary\": \"Команда провела обзор журнала тестов и документации, обсуждая формулировки и порядок демонстрации, но не приняла новых решений. Единственным значимым итогом стало подтверждение правила запуска публичного API только после нагрузочного теста.\",\n  \"decisions\": [\n    {\n      \"id\": \"D1\",\n      \"text\": \"Публичный API запускается только после нагрузочного теста.\"\n    }\n  ],\n  \"action_items\": [\n    {\n      \"id\": \"A1\",\n      \"task\": \"Выполнить нагрузочный тест\",\n      \"owner\": \"Борис\",\n      \"deadline\": \"2026-10-18\"\n    }\n  ],\n  \"open_questions\": [\n    {\n      \"id\": \"Q1\",\n      \"text\": \"Какой лимит запросов установить для бесплатного тарифа?\"\n    }\n  ],\n  \"risks\": []\n}",
+      "checks": {
+        "json_valid": true,
+        "decisions_ok": false,
+        "action_items_ok": true,
+        "owners_ok": true,
+        "deadlines_ok": true,
+        "open_questions_ok": true,
+        "risks_ok": true,
+        "superseded_facts_absent": true,
+        "unsupported_facts_absent": true,
+        "summary_length_ok": true
+      },
+      "performance": {
+        "elapsed_ms": 20576,
+        "input_tokens": 1220,
+        "output_tokens": 224,
+        "output_tokens_per_second": 10.88646967340591,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 4096,
+        "model_size_bytes": 3181547355,
+        "loaded_memory_bytes": 3181547355,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": null,
+      "passed": false
+    },
+    {
+      "scenario_id": "medium-api-launch",
+      "length_tier": "medium",
+      "profile_id": "compact",
+      "cold": false,
+      "answer": "{\n  \"summary\": \"Команда провела обзор журнала тестов и документации без принятия новых решений, за исключением подтверждения запуска публичного API после нагрузочного теста. Запланирована задача по проведению теста с ответственным Борисом до 18 октября 2026 года. Оставлен вопрос о выборе лимита запросов для бесплатного тарифа.\",\n  \"decisions\": [\n    {\n      \"id\": \"D1\",\n      \"text\": \"Публичный API запускается только после нагрузочного теста.\"\n    }\n  ],\n  \"action_items\": [\n    {\n      \"id\": \"A1\",\n      \"task\": \"Выполнить нагрузочный тест\",\n      \"owner\": \"Борис\",\n      \"deadline\": \"2026-10-18\"\n    }\n  ],\n  \"open_questions\": [\n    {\n      \"id\": \"Q1\",\n      \"text\": \"Какой лимит запросов установить для бесплатного тарифа?\"\n    }\n  ],\n  \"risks\": []\n}",
+      "checks": {
+        "json_valid": true,
+        "decisions_ok": false,
+        "action_items_ok": true,
+        "owners_ok": true,
+        "deadlines_ok": true,
+        "open_questions_ok": true,
+        "risks_ok": true,
+        "superseded_facts_absent": true,
+        "unsupported_facts_absent": true,
+        "summary_length_ok": true
+      },
+      "performance": {
+        "elapsed_ms": 22249,
+        "input_tokens": 1315,
+        "output_tokens": 243,
+        "output_tokens_per_second": 10.921839183783542,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": null,
+        "model_size_bytes": null,
+        "loaded_memory_bytes": null,
+        "quantization": null,
+        "unavailable": [
+          "профиль fox-summary-compact не найден среди загруженных моделей"
+        ]
+      },
+      "error": null,
+      "passed": false
+    },
+    {
+      "scenario_id": "medium-api-launch",
+      "length_tier": "medium",
+      "profile_id": "balanced",
+      "cold": false,
+      "answer": "{\n  \"summary\": \"Команда провела обзор журнала тестов и документации без принятия дополнительных решений. Было подтверждено ограничение запуска публичного API нагрузочным тестом. Запланирована задача по проведению теста, открыт вопрос о лимитах бесплатного тарифа.\",\n  \"decisions\": [\n    {\n      \"id\": \"D1\",\n      \"text\": \"Публичный API запускается только после нагрузочного теста.\"\n    }\n  ],\n  \"action_items\": [\n    {\n      \"id\": \"A1\",\n      \"task\": \"Выполнить нагрузочный тест\",\n      \"owner\": \"Борис\",\n      \"deadline\": \"2026-10-18\"\n    }\n  ],\n  \"open_questions\": [\n    {\n      \"id\": \"Q1\",\n      \"text\": \"Какой лимит запросов установить для бесплатного тарифа?\"\n    }\n  ],\n  \"risks\": []\n}",
+      "checks": {
+        "json_valid": true,
+        "decisions_ok": false,
+        "action_items_ok": true,
+        "owners_ok": true,
+        "deadlines_ok": true,
+        "open_questions_ok": true,
+        "risks_ok": true,
+        "superseded_facts_absent": true,
+        "unsupported_facts_absent": true,
+        "summary_length_ok": true
+      },
+      "performance": {
+        "elapsed_ms": 22581,
+        "input_tokens": 1315,
+        "output_tokens": 224,
+        "output_tokens_per_second": 9.919844116735309,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 8192,
+        "model_size_bytes": 3335792884,
+        "loaded_memory_bytes": 3335792884,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": null,
+      "passed": false
+    },
+    {
+      "scenario_id": "medium-budget-revision",
+      "length_tier": "medium",
+      "profile_id": "compact",
+      "cold": false,
+      "answer": "{\n  \"summary\": \"На встрече обсуждался предварительный бюджет, который был отклонён, но затем подтверждено новое значение для пилота. Были определены задачи по обновлению финансовой модели и выявлен риск роста стоимости инфраструктуры. В конце встречи обсуждалось оформление презентации без изменений в бюджете.\",\n  \"decisions\": [\n    {\n      \"id\": \"D1\",\n      \"text\": \"Бюджет пилота составляет 420 тысяч рублей.\"\n    }\n  ],\n  \"action_items\": [\n    {\n      \"id\": \"A1\",\n      \"task\": \"Обновить финансовую модель\",\n      \"owner\": \"Мария\",\n      \"deadline\": null\n    }\n  ],\n  \"open_questions\": [],\n  \"risks\": [\n    {\n      \"id\": \"R1\",\n      \"text\": \"Стоимость инфраструктуры может вырасти после пилота.\"\n    }\n  ]\n}",
+      "checks": {
+        "json_valid": true,
+        "decisions_ok": false,
+        "action_items_ok": true,
+        "owners_ok": true,
+        "deadlines_ok": true,
+        "open_questions_ok": true,
+        "risks_ok": false,
+        "superseded_facts_absent": true,
+        "unsupported_facts_absent": true,
+        "summary_length_ok": true
+      },
+      "performance": {
+        "elapsed_ms": 21792,
+        "input_tokens": 1259,
+        "output_tokens": 216,
+        "output_tokens_per_second": 9.911894273127754,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 4096,
+        "model_size_bytes": 3181547355,
+        "loaded_memory_bytes": 3181547355,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": null,
+      "passed": false
+    },
+    {
+      "scenario_id": "medium-budget-revision",
+      "length_tier": "medium",
+      "profile_id": "balanced",
+      "cold": false,
+      "answer": "{\n  \"summary\": \"На встрече обсуждался предварительный бюджет, который был отклонён в пользу пилотного проекта на 420 тысяч рублей. Была утверждена задача по обновлению финансовой модели и выявлен риск роста стоимости инфраструктуры.\",\n  \"decisions\": [\n    {\n      \"id\": \"D1\",\n      \"text\": \"Бюджет пилота составляет 420 тысяч рублей.\"\n    }\n  ],\n  \"action_items\": [\n    {\n      \"id\": \"A1\",\n      \"task\": \"Обновить финансовую модель\",\n      \"owner\": \"Мария\",\n      \"deadline\": null\n    }\n  ],\n  \"open_questions\": [\n    {\n      \"id\": \"R1\",\n      \"text\": \"Стоимость инфраструктуры может вырасти после пилота.\"\n    }\n  ],\n  \"risks\": [\n    {\n      \"id\": \"R1\",\n      \"text\": \"Стоимость инфраструктуры может вырасти после пилота.\"\n    }\n  ]\n}",
+      "checks": {
+        "json_valid": true,
+        "decisions_ok": false,
+        "action_items_ok": true,
+        "owners_ok": true,
+        "deadlines_ok": true,
+        "open_questions_ok": false,
+        "risks_ok": false,
+        "superseded_facts_absent": true,
+        "unsupported_facts_absent": false,
+        "summary_length_ok": true
+      },
+      "performance": {
+        "elapsed_ms": 23420,
+        "input_tokens": 1259,
+        "output_tokens": 240,
+        "output_tokens_per_second": 10.247651579846286,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 8192,
+        "model_size_bytes": 3335792884,
+        "loaded_memory_bytes": 3335792884,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": null,
+      "passed": false
+    },
+    {
+      "scenario_id": "medium-budget-revision",
+      "length_tier": "medium",
+      "profile_id": "baseline",
+      "cold": false,
+      "answer": "{\n  \"summary\": \"На встрече были рассмотрены бюджетные вопросы, поставщики, расписание и формат еженедельных отчетов. Первоначальный бюджет в 500 тысяч рублей был отклонен, а после пересчета утвержден бюджет пилота в размере 420 тысяч рублей. Обсуждались вопросы оценки инфраструктуры и оформления презентации.\",\n  \"decisions\": [\n    {\n      \"id\": \"D1\",\n      \"description\": \"РЕШЕНИЕ подтверждено: бюджет пилота составляет 420 тысяч рублей.\"\n    }\n  ],\n  \"action_items\": [\n    {\n      \"id\": \"A1\",\n      \"task\": \"обновить финансовую модель\",\n      \"owner\": \"Мария\",\n      \"deadline\": null\n    }\n  ],\n  \"open_questions\": [\n    {\n      \"id\": \"Q0\",\n      \"description\": \"Как будут оформлены материалы для презентации?\"\n    },\n    {\n      \"id\": \"Q1\",\n      \"description\": \"Какие изменения в бюджет не произведутся?\"\n    }\n  ],\n  \"risks\": [\n    {\n      \"id\": \"R1\",\n      \"description\": \"Стоимость инфраструктуры может вырасти после пилота.\"\n    }\n  ]\n}",
+      "checks": {
+        "json_valid": false,
+        "decisions_ok": false,
+        "action_items_ok": false,
+        "owners_ok": false,
+        "deadlines_ok": false,
+        "open_questions_ok": false,
+        "risks_ok": false,
+        "superseded_facts_absent": false,
+        "unsupported_facts_absent": false,
+        "summary_length_ok": false
+      },
+      "performance": {
+        "elapsed_ms": 26604,
+        "input_tokens": 1164,
+        "output_tokens": 296,
+        "output_tokens_per_second": 11.126146444143737,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 4096,
+        "model_size_bytes": 3181547355,
+        "loaded_memory_bytes": 3181547355,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": "ответ не соответствует JSON-контракту",
+      "passed": false
+    },
+    {
+      "scenario_id": "medium-owner-change",
+      "length_tier": "medium",
+      "profile_id": "balanced",
+      "cold": false,
+      "answer": "{\n  \"summary\": \"Изначально назначенная задача Олега была отменена из-за занятости на релиз. Команда передала задачу Елене с новым сроком публикации инструкции вместе с релизом.\",\n  \"decisions\": [\n    {\n      \"id\": \"D1\",\n      \"text\": \"Инструкция публикуется вместе с релизом.\"\n    }\n  ],\n  \"action_items\": [\n    {\n      \"id\": \"A1\",\n      \"task\": \"Подготовить инструкцию пользователя.\",\n      \"owner\": \"Елена\",\n      \"deadline\": \"2026-10-22\"\n    }\n  ],\n  \"open_questions\": [],\n  \"risks\": [\n    {\n      \"id\": \"R1\",\n      \"text\": \"Олег занят релизом, что привело к отмене его первоначальной задачи.\"\n    }\n  ]\n}",
+      "checks": {
+        "json_valid": true,
+        "decisions_ok": false,
+        "action_items_ok": false,
+        "owners_ok": true,
+        "deadlines_ok": true,
+        "open_questions_ok": true,
+        "risks_ok": false,
+        "superseded_facts_absent": true,
+        "unsupported_facts_absent": false,
+        "summary_length_ok": true
+      },
+      "performance": {
+        "elapsed_ms": 20390,
+        "input_tokens": 1041,
+        "output_tokens": 210,
+        "output_tokens_per_second": 10.299166257969594,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 8192,
+        "model_size_bytes": 3335792884,
+        "loaded_memory_bytes": 3335792884,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": null,
+      "passed": false
+    },
+    {
+      "scenario_id": "medium-owner-change",
+      "length_tier": "medium",
+      "profile_id": "baseline",
+      "cold": false,
+      "answer": "{\n  \"summary\": \"Встреча обсуждала подготовку инструкции для пользователей. Первоначально запланированная задача Олега (ID A0) была отменена из-за его занятости релизом, но в итоге назначенная новая задача по подготовке инструкции (ID A1) была подтверждена с ответственным Еленой и сроком до 2026-10-22. Решение было принято о публикации инструкции совместно с релизом.\",\n  \"decisions\": [\n    {\n      \"id\": \"D1\",\n      \"description\": \"Инструкция публикуется вместе с релизом.\"\n    }\n  ],\n  \"action_items\": [\n    {\n      \"id\": \"A1\",\n      \"task\": \"Подготовить инструкцию пользователя\",\n      \"owner\": \"Елена\",\n      \"deadline\": \"2026-10-22\"\n    }\n  ],\n  \"open_questions\": [],\n  \"risks\": []\n}",
+      "checks": {
+        "json_valid": false,
+        "decisions_ok": false,
+        "action_items_ok": false,
+        "owners_ok": false,
+        "deadlines_ok": false,
+        "open_questions_ok": false,
+        "risks_ok": false,
+        "superseded_facts_absent": false,
+        "unsupported_facts_absent": false,
+        "summary_length_ok": false
+      },
+      "performance": {
+        "elapsed_ms": 20385,
+        "input_tokens": 946,
+        "output_tokens": 214,
+        "output_tokens_per_second": 10.497915133676724,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 4096,
+        "model_size_bytes": 3181547355,
+        "loaded_memory_bytes": 3181547355,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": "ответ не соответствует JSON-контракту",
+      "passed": false
+    },
+    {
+      "scenario_id": "medium-owner-change",
+      "length_tier": "medium",
+      "profile_id": "compact",
+      "cold": false,
+      "answer": "{\n  \"summary\": \"Олег отменил задачу из-за занятости релизом, Елена взяла на себя подготовку инструкции с новым сроком. Инструкция будет опубликована вместе с релизом после проверки терминологии.\",\n  \"decisions\": [\n    {\n      \"id\": \"D1\",\n      \"text\": \"Инструкция публикуется вместе с релизом.\"\n    }\n  ],\n  \"action_items\": [\n    {\n      \"id\": \"A1\",\n      \"task\": \"Подготовить инструкцию пользователя\",\n      \"owner\": \"Елена\",\n      \"deadline\": \"2026-10-22\"\n    }\n  ],\n  \"open_questions\": [],\n  \"risks\": [\n    {\n      \"id\": \"R1\",\n      \"text\": \"Олег занят релизом.\"\n    }\n  ]\n}",
+      "checks": {
+        "json_valid": true,
+        "decisions_ok": false,
+        "action_items_ok": true,
+        "owners_ok": true,
+        "deadlines_ok": true,
+        "open_questions_ok": true,
+        "risks_ok": false,
+        "superseded_facts_absent": true,
+        "unsupported_facts_absent": false,
+        "summary_length_ok": true
+      },
+      "performance": {
+        "elapsed_ms": 18475,
+        "input_tokens": 1041,
+        "output_tokens": 197,
+        "output_tokens_per_second": 10.663058186738835,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": null,
+        "model_size_bytes": null,
+        "loaded_memory_bytes": null,
+        "quantization": null,
+        "unavailable": [
+          "профиль fox-summary-compact не найден среди загруженных моделей"
+        ]
+      },
+      "error": null,
+      "passed": false
+    },
+    {
+      "scenario_id": "long-database-migration",
+      "length_tier": "long",
+      "profile_id": "baseline",
+      "cold": false,
+      "answer": "Зафиксировано: все блоки Discussions 100% **НЕ СОДЕРЖАТ УТВЕРЖДЁННЫХ РЕШЕНИЙ**.\n\nВсе остальные сообщения (включая повторяющиеся абзацы о совещаниях) также не содержат утверждённых решений.\n\n**Итоговая сводка:**\n*   **Старт миграции:** 20 октября 2026 года (после резервного копирования). Предложение от 19 октября — отменено.\n*   **Задача A1 (Миграция):** Ответственный — Иван; Срок — 20.10.2026.\n*   **Задача A2 (Проверка бэкапа):** Ответственный — Анна; Срок — 20.10.2026.\n*   **Риск (R1):** Возможное увеличение времени простоя из-за legacy-схемы.\n*   **Действия сессии:** Участники обсуждали отчётность и график дежурств, но даты, владельцы и порядок миграции не менялись.",
+      "checks": {
+        "json_valid": false,
+        "decisions_ok": false,
+        "action_items_ok": false,
+        "owners_ok": false,
+        "deadlines_ok": false,
+        "open_questions_ok": false,
+        "risks_ok": false,
+        "superseded_facts_absent": false,
+        "unsupported_facts_absent": false,
+        "summary_length_ok": false
+      },
+      "performance": {
+        "elapsed_ms": 29308,
+        "input_tokens": 2050,
+        "output_tokens": 242,
+        "output_tokens_per_second": 8.257131158727992,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 4096,
+        "model_size_bytes": 3181547355,
+        "loaded_memory_bytes": 3181547355,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": "ответ должен содержать только один JSON-объект",
+      "passed": false
+    },
+    {
+      "scenario_id": "long-database-migration",
+      "length_tier": "long",
+      "profile_id": "compact",
+      "cold": false,
+      "answer": "В предоставленном тексте содержится многократно повторяющаяся информация о том, что «этот блок не содержит утверждённых решений», а также серия однотипных фраз: «После решения участники обсуждают оформление отчёта и график дежурств, не меняя дату, владельцев и порядок миграции».\n\nОднако в тексте есть конкретные **утверждённые решения** (обозначенные как `[D1]`), которые можно выделить следующим образом:\n\n### Утверждённое решение\n*   **[D1] РЕШЕНИЕ**: Миграция базы данных начинается **2026-10-21** после резервного копирования.\n\n### Выделенные задачи (ЗАДАЧИ)\n1.  **[A1]** Выполнить миграцию базы.\n    *   Ответственный: Иван\n    *   Срок: 2026-10-21\n2.  **[A2]** Проверить резервную копию.\n    *   Ответственный: Анна\n    *   Срок: 2026-10-20\n\n### Выявленные риски (РИСК)\n*   **[R1]** Несовместим",
+      "checks": {
+        "json_valid": false,
+        "decisions_ok": false,
+        "action_items_ok": false,
+        "owners_ok": false,
+        "deadlines_ok": false,
+        "open_questions_ok": false,
+        "risks_ok": false,
+        "superseded_facts_absent": false,
+        "unsupported_facts_absent": false,
+        "summary_length_ok": false
+      },
+      "performance": {
+        "elapsed_ms": 32225,
+        "input_tokens": 2050,
+        "output_tokens": 256,
+        "output_tokens_per_second": 7.944142746314973,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": null,
+        "model_size_bytes": null,
+        "loaded_memory_bytes": null,
+        "quantization": null,
+        "unavailable": [
+          "профиль fox-summary-compact не найден среди загруженных моделей"
+        ]
+      },
+      "error": "ответ должен содержать только один JSON-объект",
+      "passed": false
+    },
+    {
+      "scenario_id": "long-database-migration",
+      "length_tier": "long",
+      "profile_id": "balanced",
+      "cold": false,
+      "answer": "Вот сводка состояний и решений на основе предоставленного текста:\n\n### 📋 Состояние обсуждения (Блоки без решений)\n*   **Темы:** Детальное обсуждение таблиц, индексов, резервного копирования, порядка проверки и формата отчёта.\n*   **Статус:** В этих блоках приняты только вопросы для обсуждения; **нет утверждённых решений**.\n\n---\n\n### ✅ Утверждённые решения и задачи (12:05 – 12:20)\n\n| Время | Тип записи | Детали | Статус |\n| :--- | :--- | :--- | :--- |\n| **12:00** | Отмена предложения | Предложение о старте 19 октября и назначении Анны отменено. | ❌ Отменено |\n| **12:05** | **[D1] РЕШЕНИЕ** | Миграция базы начинается **2026-10-21** после резервного копирования. | ✅ Подтверждено |\n| **12:10** | **[A1] ЗАДАЧА** | Выполнить миграцию базы.<br>Ответственный: **Иван**<br>Срок: 2026-10-21 | 📝 В работе |\n| **12:15** | **[A2] ЗАДАЧА** | Проверить резервную копию.<br>Ответственный: **Анна**<br>Срок: 2026-10-20 | 📝 В работе |\n\n---\n\n### ⚠️ Риски\n*   **[R1]** Риск: Несовместимая legacy-схема может увеличить время простоя.\n\n---\n\n### 🔄 Пост-решение обсуждение\nПосле принятия ключевых решений (дата, владельцы, порядок) участники обсуждали оформление отчёта и график дежурств. В ходе этих обсуждений **не было внесено изменений** в дату, владельцев или порядок миграции.",
+      "checks": {
+        "json_valid": false,
+        "decisions_ok": false,
+        "action_items_ok": false,
+        "owners_ok": false,
+        "deadlines_ok": false,
+        "open_questions_ok": false,
+        "risks_ok": false,
+        "superseded_facts_absent": false,
+        "unsupported_facts_absent": false,
+        "summary_length_ok": false
+      },
+      "performance": {
+        "elapsed_ms": 70837,
+        "input_tokens": 4098,
+        "output_tokens": 449,
+        "output_tokens_per_second": 6.338495419060661,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 8192,
+        "model_size_bytes": 3412255046,
+        "loaded_memory_bytes": 3412255046,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": "ответ должен содержать только один JSON-объект",
+      "passed": false
+    },
+    {
+      "scenario_id": "long-security-review",
+      "length_tier": "long",
+      "profile_id": "compact",
+      "cold": false,
+      "answer": "Судя по предоставленному тексту, это **минутная запись (транскрипт) встречи**, которая демонстрирует классическую ситуацию с «бесконечным циклом» обсуждения без достижения консенсуса по ключевому вопросу.\n\nВот структурированный анализ ситуации:\n\n### 1. Принятые решения и задачи\n*   **Решение (D1):** Провести внутренний security review серверной части до релиза. Решение принято и не оспорено в ходе обсуждения.\n*   **Задача (A1):** Составить threat model.\n    *   Ответственный: Сергей.\n    *   Срок: 25 октября 2026 года.\n\n### 2. Выявленные проблемы\nТекст содержит повторяющиеся фразы, указывающие на застой в обсуждении:\n*   **Открытый вопрос:** Вопрос о **внешнем аудите** остается нерешенным («не закрывая вопрос о внешнем аудите»). Участники уточняют детали внутреннего отчета, но не решают главную проблему — необходимость или отсутствие внешнего аудита.\n*   **Риск (R1):** Существует риск критической находки, которая",
+      "checks": {
+        "json_valid": false,
+        "decisions_ok": false,
+        "action_items_ok": false,
+        "owners_ok": false,
+        "deadlines_ok": false,
+        "open_questions_ok": false,
+        "risks_ok": false,
+        "superseded_facts_absent": false,
+        "unsupported_facts_absent": false,
+        "summary_length_ok": false
+      },
+      "performance": {
+        "elapsed_ms": 34414,
+        "input_tokens": 2050,
+        "output_tokens": 256,
+        "output_tokens_per_second": 7.4388330330679375,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 4096,
+        "model_size_bytes": 3181547355,
+        "loaded_memory_bytes": 3181547355,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": "ответ должен содержать только один JSON-объект",
+      "passed": false
+    },
+    {
+      "scenario_id": "long-security-review",
+      "length_tier": "long",
+      "profile_id": "balanced",
+      "cold": false,
+      "answer": "{\n  \"summary\": \"На встрече обсуждались замечания к презентации, технические детали протоколов и формат отчёта, но решения по ним не принимались. Были подтверждены вопросы о внешнем аудите мобильного клиента и внутреннем security review серверной части.\",\n  \"decisions\": [\n    {\n      \"id\": \"D1\",\n      \"text\": \"Провести внутренний security review серверной части до релиза.\"\n    }\n  ],\n  \"action_items\": [\n    {\n      \"id\": \"A1\",\n      \"task\": \"Составить threat model\",\n      \"owner\": \"Сергей\",\n      \"deadline\": \"2026-10-25\"\n    }\n  ],\n  \"open_questions\": [\n    {\n      \"id\": \"Q1\",\n      \"text\": \"Нужен ли внешний аудит мобильного клиента?\"\n    }\n  ],\n  \"risks\": [\n    {\n      \"id\": \"R1\",\n      \"text\": \"Критическая находка может перенести дату релиза.\"\n    }\n  ]\n}",
+      "checks": {
+        "json_valid": true,
+        "decisions_ok": false,
+        "action_items_ok": true,
+        "owners_ok": true,
+        "deadlines_ok": true,
+        "open_questions_ok": true,
+        "risks_ok": false,
+        "superseded_facts_absent": true,
+        "unsupported_facts_absent": true,
+        "summary_length_ok": true
+      },
+      "performance": {
+        "elapsed_ms": 70977,
+        "input_tokens": 7667,
+        "output_tokens": 253,
+        "output_tokens_per_second": 3.5645349902080956,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 8192,
+        "model_size_bytes": 3335792884,
+        "loaded_memory_bytes": 3335792884,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": null,
+      "passed": false
+    },
+    {
+      "scenario_id": "long-security-review",
+      "length_tier": "long",
+      "profile_id": "baseline",
+      "cold": false,
+      "answer": "Исходя из предоставленного текста, ситуация в команде характеризуется следующими фактами:\n\n**Принятые решения:**\n*   **Решение [D1] (11:00):** Прошел внутренний `security review` серверной части до релиза. Это решение не менялось на протяжении всего времени обсуждений.\n\n**Выполненные задачи:**\n*   **Задача [A1] (11:05):** Составить threat model.\n    *   Ответственный: Сергей.\n    *   Срок исполнения: 25 октября 2026 года.\n\n**Открытые вопросы и проблемы:**\nВесь текст после принятия решения повторяет одну и ту же фразу о том, что участники уточняют формат отчёта, **не закрывая два ключевых вопроса**:\n1.  Не закрыт вопрос о **внешнем аудите**.\n2.  Не изменено (сохранено) принятое решение относительно внутренних проверок.\n\n**Анализ динамики:**\nТекст представляет собой список повторяющихся сценариев («In the remaining time...»), что указывает на длительную фазу обсуждения или тупиковую ситуацию, где прогресс по закрытию рисков остановился. Несмотря на формальное принятие решения про внутренний ривью, критический риск того, что находка может перенести дату релиза (указанный в риске [R1]), остается актуальной угрозой, которая не была устранена отсутствием данных о внешнем аудите и четкой формулировке отчетов.",
+      "checks": {
+        "json_valid": false,
+        "decisions_ok": false,
+        "action_items_ok": false,
+        "owners_ok": false,
+        "deadlines_ok": false,
+        "open_questions_ok": false,
+        "risks_ok": false,
+        "superseded_facts_absent": false,
+        "unsupported_facts_absent": false,
+        "summary_length_ok": false
+      },
+      "performance": {
+        "elapsed_ms": 35704,
+        "input_tokens": 2050,
+        "output_tokens": 337,
+        "output_tokens_per_second": 9.438718350885054,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 4096,
+        "model_size_bytes": 3181547355,
+        "loaded_memory_bytes": 3181547355,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": "ответ должен содержать только один JSON-объект",
+      "passed": false
+    },
+    {
+      "scenario_id": "long-mobile-scope",
+      "length_tier": "long",
+      "profile_id": "balanced",
+      "cold": false,
+      "answer": "{\n  \"summary\": \"Команда рассмотрела макеты и сценарии без фиксации решений, отклонила предложение об офлайн-режиме в первой версии и подтвердила работу только онлайн. Обсуждались цвета, иллюстрации и формат презентации.\",\n  \"decisions\": [\n    {\n      \"id\": \"D1\",\n      \"text\": \"первая версия мобильного клиента работает только онлайн\"\n    }\n  ],\n  \"action_items\": [\n    {\n      \"id\": \"A1\",\n      \"task\": \"обновить описание scope\",\n      \"owner\": \"Дина\",\n      \"deadline\": \"2026-10-24\"\n    }\n  ],\n  \"open_questions\": [\n    {\n      \"id\": \"Q1\",\n      \"text\": \"в какой версии вернуться к офлайн-режиму?\"\n    }\n  ],\n  \"risks\": [\n    {\n      \"id\": \"R1\",\n      \"text\": \"пользователи с нестабильной сетью могут отказаться от пилота\"\n    }\n  ]\n}",
+      "checks": {
+        "json_valid": true,
+        "decisions_ok": true,
+        "action_items_ok": true,
+        "owners_ok": true,
+        "deadlines_ok": true,
+        "open_questions_ok": true,
+        "risks_ok": true,
+        "superseded_facts_absent": true,
+        "unsupported_facts_absent": true,
+        "summary_length_ok": true
+      },
+      "performance": {
+        "elapsed_ms": 64452,
+        "input_tokens": 7479,
+        "output_tokens": 252,
+        "output_tokens_per_second": 3.909886427108546,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 8192,
+        "model_size_bytes": 3335792884,
+        "loaded_memory_bytes": 3335792884,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": null,
+      "passed": true
+    },
+    {
+      "scenario_id": "long-mobile-scope",
+      "length_tier": "long",
+      "profile_id": "baseline",
+      "cold": false,
+      "answer": "Вы предоставили текст с высокой степенью повтора (более 70 раз), который гласит:  \n**«После подтверждения scope команда обсуждает цвета, иллюстрации и формат презентации, не возвращая офлайн-режим в первую версию.»**\n\nЭтот текст звучит как пункт из технического задания (техническое задание) или правила разработки программного обеспечения. Однако текущее количество повторов делает его бессмысленным для понимания и использования.\n\nЧтобы я мог быть вам полезен, пожалуйста:\n1. **Сократите повторы**, оставив только один корректный абзац.\n2. Или уточните контекст: хотите ли вы получить **расшифровку**, **перефразирование**, **структурирование** (например, в виде списка шагов) этого правила?\n3. Возможно, это заголовок или условие из какой-то системы управления проектами, и вам нужен **анализ его влияния на процесс разработки**?",
+      "checks": {
+        "json_valid": false,
+        "decisions_ok": false,
+        "action_items_ok": false,
+        "owners_ok": false,
+        "deadlines_ok": false,
+        "open_questions_ok": false,
+        "risks_ok": false,
+        "superseded_facts_absent": false,
+        "unsupported_facts_absent": false,
+        "summary_length_ok": false
+      },
+      "performance": {
+        "elapsed_ms": 26665,
+        "input_tokens": 2050,
+        "output_tokens": 205,
+        "output_tokens_per_second": 7.687980498781174,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": 4096,
+        "model_size_bytes": 3181547355,
+        "loaded_memory_bytes": 3181547355,
+        "quantization": "Q4_K_M",
+        "unavailable": []
+      },
+      "error": "ответ должен содержать только один JSON-объект",
+      "passed": false
+    },
+    {
+      "scenario_id": "long-mobile-scope",
+      "length_tier": "long",
+      "profile_id": "compact",
+      "cold": false,
+      "answer": "Похоже, что текст повторяется многократно без изменений. Возможно, это техническая ошибка при копировании или случайное повторение.\n\nЕсли вы хотели обсудить **цвета, иллюстрации и формат презентации** для проекта «Т-режим» (первая версия), давайте структурируем этот процесс:\n\n1.  **Цвета:**\n    *   Какие палитры лучше всего передают суть «Т-режима»?\n    *   Нужны ли акцентные цвета для выделения ключевых элементов?\n    *   Соответствуют ли выбранные цвета брендингу или целевой аудитории?\n\n2.  **Иллюстрации:**\n    *   Какой стиль иллюстраций подходит лучше всего: минималистичный, мультяшный, реалистичный или абстрактный?\n    *   Нужны ли персонажи или логотипы в качестве центральных элементов?\n    *   Какую историю нужно рассказать через визуальные образы?\n\n3.  **Формат презентации:**\n    *   Будет ли это слайдовая презентация (PowerPoint, Keynote), инфографика, видео-презентация или интерактивный формат?",
+      "checks": {
+        "json_valid": false,
+        "decisions_ok": false,
+        "action_items_ok": false,
+        "owners_ok": false,
+        "deadlines_ok": false,
+        "open_questions_ok": false,
+        "risks_ok": false,
+        "superseded_facts_absent": false,
+        "unsupported_facts_absent": false,
+        "summary_length_ok": false
+      },
+      "performance": {
+        "elapsed_ms": 27824,
+        "input_tokens": 2050,
+        "output_tokens": 256,
+        "output_tokens_per_second": 9.200690051753881,
+        "throughput_unavailable_reason": null
+      },
+      "runtime": {
+        "context_length": null,
+        "model_size_bytes": null,
+        "loaded_memory_bytes": null,
+        "quantization": null,
+        "unavailable": [
+          "профиль fox-summary-compact не найден среди загруженных моделей"
+        ]
+      },
+      "error": "ответ должен содержать только один JSON-объект",
+      "passed": false
+    }
+  ],
+  "aggregates": [
+    {
+      "profile_id": "baseline",
+      "length_tier": null,
+      "total": 9,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "cold_runs": 1,
+      "warm_runs": 8,
+      "median_warm_elapsed_ms": 26604,
+      "median_loaded_memory_bytes": 3181547355,
+      "input_tokens": 10085,
+      "output_tokens": 2058
+    },
+    {
+      "profile_id": "baseline",
+      "length_tier": "short",
+      "total": 3,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "cold_runs": 1,
+      "warm_runs": 2,
+      "median_warm_elapsed_ms": 16662,
+      "median_loaded_memory_bytes": 3181547355,
+      "input_tokens": 605,
+      "output_tokens": 540
+    },
+    {
+      "profile_id": "baseline",
+      "length_tier": "medium",
+      "total": 3,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "cold_runs": 0,
+      "warm_runs": 3,
+      "median_warm_elapsed_ms": 20576,
+      "median_loaded_memory_bytes": 3181547355,
+      "input_tokens": 3330,
+      "output_tokens": 734
+    },
+    {
+      "profile_id": "baseline",
+      "length_tier": "long",
+      "total": 3,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "cold_runs": 0,
+      "warm_runs": 3,
+      "median_warm_elapsed_ms": 29308,
+      "median_loaded_memory_bytes": 3181547355,
+      "input_tokens": 6150,
+      "output_tokens": 784
+    },
+    {
+      "profile_id": "compact",
+      "length_tier": null,
+      "total": 9,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "cold_runs": 1,
+      "warm_runs": 8,
+      "median_warm_elapsed_ms": 22249,
+      "median_loaded_memory_bytes": 3181547355,
+      "input_tokens": 10655,
+      "output_tokens": 1728
+    },
+    {
+      "profile_id": "compact",
+      "length_tier": "short",
+      "total": 3,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "cold_runs": 1,
+      "warm_runs": 2,
+      "median_warm_elapsed_ms": 10037,
+      "median_loaded_memory_bytes": 3181547355,
+      "input_tokens": 890,
+      "output_tokens": 304
+    },
+    {
+      "profile_id": "compact",
+      "length_tier": "medium",
+      "total": 3,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "cold_runs": 0,
+      "warm_runs": 3,
+      "median_warm_elapsed_ms": 21792,
+      "median_loaded_memory_bytes": 3181547355,
+      "input_tokens": 3615,
+      "output_tokens": 656
+    },
+    {
+      "profile_id": "compact",
+      "length_tier": "long",
+      "total": 3,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "cold_runs": 0,
+      "warm_runs": 3,
+      "median_warm_elapsed_ms": 32225,
+      "median_loaded_memory_bytes": 3181547355,
+      "input_tokens": 6150,
+      "output_tokens": 768
+    },
+    {
+      "profile_id": "balanced",
+      "length_tier": null,
+      "total": 9,
+      "passed": 1,
+      "pass_rate": 0.1111111111111111,
+      "cold_runs": 1,
+      "warm_runs": 8,
+      "median_warm_elapsed_ms": 23420,
+      "median_loaded_memory_bytes": 3335792884,
+      "input_tokens": 23749,
+      "output_tokens": 1951
+    },
+    {
+      "profile_id": "balanced",
+      "length_tier": "short",
+      "total": 3,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "cold_runs": 1,
+      "warm_runs": 2,
+      "median_warm_elapsed_ms": 10579,
+      "median_loaded_memory_bytes": 3335792884,
+      "input_tokens": 890,
+      "output_tokens": 323
+    },
+    {
+      "profile_id": "balanced",
+      "length_tier": "medium",
+      "total": 3,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "cold_runs": 0,
+      "warm_runs": 3,
+      "median_warm_elapsed_ms": 22581,
+      "median_loaded_memory_bytes": 3335792884,
+      "input_tokens": 3615,
+      "output_tokens": 674
+    },
+    {
+      "profile_id": "balanced",
+      "length_tier": "long",
+      "total": 3,
+      "passed": 1,
+      "pass_rate": 0.3333333333333333,
+      "cold_runs": 0,
+      "warm_runs": 3,
+      "median_warm_elapsed_ms": 70837,
+      "median_loaded_memory_bytes": 3335792884,
+      "input_tokens": 19244,
+      "output_tokens": 954
+    }
+  ],
+  "recommended_profile": "balanced"
+}

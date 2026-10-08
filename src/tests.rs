@@ -7,7 +7,7 @@ use rustyline::{
 };
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -27,7 +27,7 @@ mod suite {
     };
     use std::{collections::VecDeque, sync::Mutex, time::Duration};
 
-    type RecordedCall = (Option<String>, Vec<Message>, Provider);
+    type RecordedCall = (Option<String>, Vec<Message>, Provider, String, f64);
 
     struct ScriptedClient {
         responses: Mutex<VecDeque<anyhow::Result<ApiAnswer>>>,
@@ -54,6 +54,8 @@ mod suite {
                 settings.instructions.clone(),
                 history.to_vec(),
                 settings.provider,
+                settings.model.clone(),
+                settings.temperature,
             ));
             let response = self.responses.lock().unwrap().pop_front().unwrap();
             Box::pin(async move { response })
@@ -4849,5 +4851,439 @@ mod suite {
         assert!(!should_retrieve_rag(false, true));
         assert!(!should_retrieve_rag(true, false));
         assert!(should_retrieve_rag(true, true));
+    }
+
+    struct FakeOllamaInspector {
+        preflights: AtomicUsize,
+        runtime: RuntimeMetadata,
+    }
+
+    impl FakeOllamaInspector {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                preflights: AtomicUsize::new(0),
+                runtime: RuntimeMetadata {
+                    context_length: Some(8192),
+                    model_size_bytes: Some(3_300_000_000),
+                    loaded_memory_bytes: Some(4_000_000_000),
+                    quantization: Some("Q4_K_M".into()),
+                    unavailable: Vec::new(),
+                },
+            })
+        }
+    }
+
+    impl OllamaInspector for FakeOllamaInspector {
+        fn preflight<'a>(
+            &'a self,
+            profile: &'a EvaluationProfile,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<ModelIdentity>> + Send + 'a>,
+        > {
+            self.preflights.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(ModelIdentity {
+                    alias: profile.model.clone(),
+                    family: "qwen35".into(),
+                    parameter_size: Some("4.2B".into()),
+                    quantization: "Q4_K_M".into(),
+                })
+            })
+        }
+
+        fn runtime<'a>(
+            &'a self,
+            _model: &'a str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<RuntimeMetadata>> + Send + 'a>,
+        > {
+            let runtime = self.runtime.clone();
+            Box::pin(async move { Ok(runtime) })
+        }
+    }
+
+    fn day29_fixture_paths() -> (std::path::PathBuf, std::path::PathBuf) {
+        (
+            std::path::PathBuf::from("reports/day29/dataset.json"),
+            std::path::PathBuf::from("reports/day29/profiles.json"),
+        )
+    }
+
+    #[test]
+    fn summarize_eval_arguments_are_explicit_and_strict() {
+        let mode = parse_startup_mode(vec![
+            "summarize-eval".into(),
+            "--dataset".into(),
+            "dataset.json".into(),
+            "--profiles".into(),
+            "profiles.json".into(),
+            "--output".into(),
+            "result.json".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            mode,
+            StartupMode::SummarizeEval(SummarizeEvalOptions {
+                dataset: "dataset.json".into(),
+                profiles: "profiles.json".into(),
+                output: "result.json".into(),
+            })
+        );
+        assert!(parse_summarize_eval_options(&[]).is_err());
+        assert!(parse_summarize_eval_options(&[
+            "--dataset".into(),
+            "a".into(),
+            "--dataset".into(),
+            "b".into(),
+            "--profiles".into(),
+            "p".into(),
+            "--output".into(),
+            "o".into(),
+        ])
+        .is_err());
+        assert!(parse_summarize_eval_options(&[
+            "--dataset".into(),
+            "a".into(),
+            "--profiles".into(),
+            "p".into(),
+            "--output".into(),
+            "o".into(),
+            "--unknown".into(),
+            "x".into(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn day29_dataset_and_profiles_match_the_declared_experiment() {
+        let root = std::env::current_dir().unwrap();
+        let (dataset_path, profiles_path) = day29_fixture_paths();
+        let dataset = load_dataset(&root, &dataset_path).unwrap();
+        let profiles = load_profiles(&root, &profiles_path).unwrap();
+        assert_eq!(dataset.scenarios.len(), 9);
+        for tier in [LengthTier::Short, LengthTier::Medium, LengthTier::Long] {
+            assert_eq!(
+                dataset
+                    .scenarios
+                    .iter()
+                    .filter(|scenario| scenario.length_tier == tier)
+                    .count(),
+                3
+            );
+        }
+        let by_id = profiles
+            .profiles
+            .iter()
+            .map(|profile| (profile.id.as_str(), profile))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            (
+                by_id["baseline"].temperature,
+                by_id["baseline"].num_ctx,
+                by_id["baseline"].num_predict
+            ),
+            (1.0, 4096, 1024)
+        );
+        assert_eq!(
+            (
+                by_id["compact"].temperature,
+                by_id["compact"].num_ctx,
+                by_id["compact"].num_predict
+            ),
+            (0.0, 4096, 256)
+        );
+        assert_eq!(
+            (
+                by_id["balanced"].temperature,
+                by_id["balanced"].num_ctx,
+                by_id["balanced"].num_predict
+            ),
+            (0.2, 8192, 512)
+        );
+        for (name, context, predict) in [
+            ("baseline", 4096, 1024),
+            ("compact", 4096, 256),
+            ("balanced", 8192, 512),
+        ] {
+            let modelfile =
+                fs::read_to_string(format!("reports/day29/profiles/Modelfile.{name}")).unwrap();
+            assert!(modelfile.contains("FROM qwen3.5:4b"));
+            assert!(modelfile.contains(&format!("PARAMETER num_ctx {context}")));
+            assert!(modelfile.contains(&format!("PARAMETER num_predict {predict}")));
+        }
+        assert!(dataset
+            .scenarios
+            .iter()
+            .filter(|scenario| scenario.length_tier == LengthTier::Long)
+            .all(|scenario| scenario.rendered_transcript().split_whitespace().count() > 2500));
+    }
+
+    #[tokio::test]
+    async fn invalid_summary_dataset_stops_before_preflight_or_generation() {
+        let dataset = BenchmarkDataset {
+            version: 1,
+            scenarios: Vec::new(),
+        };
+        let root = std::env::current_dir().unwrap();
+        let (_, profiles_path) = day29_fixture_paths();
+        let profiles = load_profiles(&root, &profiles_path).unwrap();
+        let client = ScriptedClient::new(Vec::new());
+        let inspector = FakeOllamaInspector::new();
+        let mut progress = Vec::new();
+        assert!(run_evaluation_with_clients(
+            dataset,
+            profiles,
+            Client::new(),
+            client.clone(),
+            inspector.clone(),
+            &mut progress,
+        )
+        .await
+        .is_err());
+        assert!(client.calls.lock().unwrap().is_empty());
+        assert_eq!(inspector.preflights.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn ollama_metadata_validation_rejects_missing_or_wrong_models() {
+        let root = std::env::current_dir().unwrap();
+        let (_, profiles_path) = day29_fixture_paths();
+        let profiles = load_profiles(&root, &profiles_path).unwrap();
+        let profile = &profiles.profiles[0];
+        assert!(validate_show_response(
+            profile,
+            reqwest::StatusCode::NOT_FOUND,
+            &json!({"error": "model not found"}),
+        )
+        .is_err());
+        assert!(validate_show_response(
+            profile,
+            reqwest::StatusCode::OK,
+            &json!({"details": {"family": "llama", "parameter_size": "4.2B", "quantization_level": "Q4_K_M"}, "parameters": "num_ctx 4096\nnum_predict 1024"}),
+        )
+        .is_err());
+        assert!(validate_show_response(
+            profile,
+            reqwest::StatusCode::OK,
+            &json!({"details": {"family": "qwen35", "parameter_size": "4.2B", "quantization_level": "Q8_0"}, "parameters": "num_ctx 4096\nnum_predict 1024"}),
+        )
+        .is_err());
+        let identity = validate_show_response(
+            profile,
+            reqwest::StatusCode::OK,
+            &json!({"details": {"family": "qwen35", "parameter_size": "4.2B", "quantization_level": "Q4_K_M"}, "parameters": "num_ctx 4096\nnum_predict 1024"}),
+        )
+        .unwrap();
+        assert_eq!(identity.quantization, "Q4_K_M");
+    }
+
+    #[test]
+    fn ollama_runtime_metadata_preserves_unavailable_fields_as_null() {
+        let metadata = parse_ps_response(
+            "fox-summary-balanced",
+            reqwest::StatusCode::OK,
+            &json!({"models": [{
+                "name": "fox-summary-balanced:latest",
+                "size": 3300000000_u64,
+                "details": {"quantization_level": "Q4_K_M"}
+            }]}),
+        )
+        .unwrap();
+        assert_eq!(metadata.model_size_bytes, Some(3_300_000_000));
+        assert_eq!(metadata.context_length, None);
+        assert_eq!(metadata.loaded_memory_bytes, None);
+        assert_eq!(metadata.unavailable.len(), 2);
+    }
+
+    #[test]
+    fn specialized_summary_prompt_and_parser_enforce_the_contract() {
+        let prompt = prompt_for(PromptKind::Specialized);
+        assert!(prompt.contains("Более позднее"));
+        assert!(prompt.contains("null"));
+        assert!(prompt.contains("не более пяти"));
+        assert!(!prompt.contains("RAG"));
+        assert!(!prompt.contains("MCP"));
+        assert!(!prompt.contains("Долговременные факты"));
+
+        let valid = json!({
+            "summary": "Итог.",
+            "decisions": [{"id": "D1", "text": "Решение"}],
+            "action_items": [{"id": "A1", "task": "Задача", "owner": null, "deadline": null}],
+            "open_questions": [],
+            "risks": []
+        });
+        assert!(parse_summary(&valid.to_string()).is_ok());
+        assert!(parse_summary(&format!("```json\n{valid}\n```")).is_err());
+        assert!(parse_summary(&format!("Пояснение\n{valid}")).is_err());
+    }
+
+    #[test]
+    fn summary_scoring_detects_missing_stale_and_unsupported_facts() {
+        let expected = MeetingSummary {
+            summary: "Актуальный итог.".into(),
+            decisions: vec![SummaryFact {
+                id: "D1".into(),
+                text: "PostgreSQL".into(),
+            }],
+            action_items: vec![ActionItem {
+                id: "A1".into(),
+                task: "Миграция".into(),
+                owner: Some("Иван".into()),
+                deadline: None,
+            }],
+            open_questions: Vec::new(),
+            risks: Vec::new(),
+        };
+        let good = assess_summary(
+            &expected,
+            &expected,
+            &["SQLite".into()],
+            &serde_json::to_string(&expected).unwrap(),
+        );
+        assert!(good.passed());
+
+        let mut bad = expected.clone();
+        bad.decisions.push(SummaryFact {
+            id: "D2".into(),
+            text: "SQLite".into(),
+        });
+        bad.action_items[0].owner = Some("Анна".into());
+        let checks = assess_summary(
+            &bad,
+            &expected,
+            &["SQLite".into()],
+            &serde_json::to_string(&bad).unwrap(),
+        );
+        assert!(!checks.decisions_ok);
+        assert!(!checks.owners_ok);
+        assert!(!checks.superseded_facts_absent);
+        assert!(!checks.unsupported_facts_absent);
+        assert!(!checks.passed());
+    }
+
+    #[test]
+    fn performance_and_recommendation_do_not_invent_missing_metrics() {
+        let missing = performance_metrics(12, 0, 0);
+        assert_eq!(missing.output_tokens_per_second, None);
+        assert!(missing.throughput_unavailable_reason.is_some());
+        let aggregates = vec![
+            AggregateReport {
+                profile_id: "compact".into(),
+                length_tier: None,
+                total: 3,
+                passed: 3,
+                pass_rate: 1.0,
+                cold_runs: 1,
+                warm_runs: 2,
+                median_warm_elapsed_ms: Some(10),
+                median_loaded_memory_bytes: Some(100),
+                input_tokens: 10,
+                output_tokens: 10,
+            },
+            AggregateReport {
+                profile_id: "balanced".into(),
+                length_tier: None,
+                total: 3,
+                passed: 3,
+                pass_rate: 1.0,
+                cold_runs: 1,
+                warm_runs: 2,
+                median_warm_elapsed_ms: Some(20),
+                median_loaded_memory_bytes: Some(90),
+                input_tokens: 10,
+                output_tokens: 10,
+            },
+        ];
+        assert_eq!(recommend_profile(&aggregates).as_deref(), Some("compact"));
+    }
+
+    #[tokio::test]
+    async fn summary_runner_isolates_calls_logs_progress_and_sanitizes_results() {
+        let root = std::env::current_dir().unwrap();
+        let (dataset_path, profiles_path) = day29_fixture_paths();
+        let dataset = load_dataset(&root, &dataset_path).unwrap();
+        let profiles = load_profiles(&root, &profiles_path).unwrap();
+        let responses = dataset
+            .scenarios
+            .iter()
+            .flat_map(|scenario| {
+                let answer = serde_json::to_string(&scenario.expected).unwrap();
+                (0..3).map(move |_| scripted_answer(&answer))
+            })
+            .collect::<Vec<_>>();
+        let client = ScriptedClient::new(responses);
+        let inspector = FakeOllamaInspector::new();
+        let mut progress = Vec::new();
+        let report = run_evaluation_with_clients(
+            dataset,
+            profiles,
+            Client::new(),
+            client.clone(),
+            inspector,
+            &mut progress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.cases.len(), 27);
+        assert!(report.cases.iter().all(|case| case.passed));
+        assert_eq!(report.aggregates.len(), 12);
+        let mut degraded = report.cases.clone();
+        degraded
+            .iter_mut()
+            .find(|case| case.length_tier == LengthTier::Long && case.profile_id == "compact")
+            .unwrap()
+            .passed = false;
+        let degraded_aggregates = aggregate_reports(&degraded, &report.profiles);
+        let compact_all = degraded_aggregates
+            .iter()
+            .find(|aggregate| aggregate.profile_id == "compact" && aggregate.length_tier.is_none())
+            .unwrap();
+        let compact_long = degraded_aggregates
+            .iter()
+            .find(|aggregate| {
+                aggregate.profile_id == "compact" && aggregate.length_tier == Some(LengthTier::Long)
+            })
+            .unwrap();
+        assert!(compact_all.pass_rate < 1.0);
+        assert!(compact_long.pass_rate < compact_all.pass_rate);
+        let calls = client.calls.lock().unwrap();
+        assert_eq!(calls.len(), 27);
+        assert!(calls.iter().all(|(_, history, provider, _, _)| {
+            *provider == Provider::Ollama && history.len() == 1 && history[0].role == "user"
+        }));
+        let called_models = calls
+            .iter()
+            .map(|call| (call.3.as_str(), call.4.to_bits()))
+            .collect::<HashSet<_>>();
+        assert_eq!(called_models.len(), 3);
+        let log = String::from_utf8(progress).unwrap();
+        assert!(log.contains("[summarize-eval][start]"));
+        assert!(log.contains("[summarize-eval][case_done]"));
+        assert!(log.contains("state=cold"));
+        assert!(log.contains("state=warm"));
+        assert!(!log.contains("Протокол встречи"));
+        assert!(!log.contains("Используй только факты"));
+        assert!(!log.contains("Выпуск версии состоится"));
+    }
+
+    #[test]
+    fn summary_answer_sanitizer_drops_authorization_like_content() {
+        let safe = sanitize_answer("{\"summary\":\"обычный итог\"}");
+        assert!(safe.contains("обычный итог"));
+        let secret = sanitize_answer("Authorization: Bearer very-secret-token");
+        assert!(secret.contains("скрыт"));
+        assert!(!secret.contains("very-secret-token"));
+    }
+
+    #[test]
+    fn atomic_summary_report_replaces_only_after_complete_serialization() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("result.json");
+        fs::write(&path, "old").unwrap();
+        write_json_atomically(&path, &json!({"prompt_id": "specialized", "passed": true})).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.contains("prompt_id"));
+        assert!(!written.contains("old"));
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 }
