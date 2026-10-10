@@ -183,6 +183,7 @@ mod tests {
         AgentSettings {
             provider: Provider::Ollama,
             api_key: None,
+            endpoint: None,
             model: "qwen3.5:4b".into(),
             temperature: 0.8,
             instructions: Some("Активный пользовательский режим".into()),

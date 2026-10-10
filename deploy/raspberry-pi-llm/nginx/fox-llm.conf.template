@@ -1,0 +1,45 @@
+# Подставляется setup.sh. Файл устанавливается в /etc/nginx/conf.d/.
+limit_req_zone $binary_remote_addr zone=fox_llm_per_ip:10m rate=30r/m;
+
+server {
+    listen __PI_LISTEN_ADDRESS__:11435;
+    server_name _;
+
+    allow __LAN_CIDR__;
+    deny all;
+
+    # Это отдельная транспортная граница, не лимит контекста модели.
+    client_max_body_size 256k;
+
+    location /api/ {
+        limit_req zone=fox_llm_per_ip burst=5 nodelay;
+        limit_req_status 429;
+        proxy_pass http://127.0.0.1:11434;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        chunked_transfer_encoding on;
+    }
+
+    location /v1/ {
+        limit_req zone=fox_llm_per_ip burst=5 nodelay;
+        limit_req_status 429;
+        proxy_pass http://127.0.0.1:11434;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        chunked_transfer_encoding on;
+    }
+
+    location / {
+        return 404;
+    }
+}

@@ -156,6 +156,7 @@ pub(crate) async fn run() -> Result<()> {
         None => choose_provider()?,
     };
     authorize_if_needed(&mut config, provider, &config_path)?;
+    configure_ollama_remote_endpoint_if_needed(&mut config, provider, &config_path)?;
     remember_provider(&mut config, provider, &config_path)?;
     let mut active_mode = config
         .last_mode
@@ -301,6 +302,7 @@ pub(crate) async fn run() -> Result<()> {
                 let session = sessions.load(session_id)?;
                 provider = session.provider;
                 authorize_if_needed(&mut config, provider, &config_path)?;
+                configure_ollama_remote_endpoint_if_needed(&mut config, provider, &config_path)?;
                 config.last_provider = Some(provider);
                 config.set_model(provider, session.model.clone())?;
                 config.set_temperature(provider, session.temperature)?;
@@ -373,6 +375,7 @@ pub(crate) async fn run() -> Result<()> {
                 let memory = agents.memory();
                 provider = choose_provider()?;
                 authorize_if_needed(&mut config, provider, &config_path)?;
+                configure_ollama_remote_endpoint_if_needed(&mut config, provider, &config_path)?;
                 remember_provider(&mut config, provider, &config_path)?;
                 agents.reconfigure(AgentSettings::from_config(
                     &config,
@@ -392,6 +395,26 @@ pub(crate) async fn run() -> Result<()> {
                         .cyan()
                         .bold()
                 );
+                continue;
+            }
+            "/endpoint" => {
+                if provider != Provider::OllamaRemote {
+                    println!(
+                        "{}",
+                        style("Команда /endpoint доступна только для Ollama Remote.").yellow()
+                    );
+                    continue;
+                }
+                change_ollama_remote_endpoint(&mut config, &config_path)?;
+                let memory = agents.memory();
+                agents.reconfigure(AgentSettings::from_config(
+                    &config,
+                    provider,
+                    active_mode.and_then(|index| modes.modes.get(index)),
+                )?);
+                agents.set_memory(memory);
+                active_session_id = None;
+                println!("{}", style("Начата новая сессия.").dim());
                 continue;
             }
             "/model" => {
