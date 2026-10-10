@@ -670,6 +670,7 @@ mod tests {
         AgentSettings {
             provider: Provider::Openai,
             api_key: Some("fake".into()),
+            endpoint: None,
             model: "fake".into(),
             temperature: 0.0,
             instructions: None,

@@ -36,6 +36,7 @@ pub(crate) const OLLAMA_RESPONSES_URL: &str = "http://127.0.0.1:11434/v1/respons
 pub(crate) const OLLAMA_MODELS_URL: &str = "http://127.0.0.1:11434/v1/models";
 pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("/provider", "сменить провайдера"),
+    ("/endpoint", "настроить адрес Ollama Remote"),
     ("/model", "выбрать модель текущего провайдера"),
     ("/mode", "выбрать или создать режим ответа"),
     ("/compression", "выбрать стратегию управления контекстом"),
@@ -90,6 +91,8 @@ pub(crate) enum Provider {
     Openai,
     Claude,
     Ollama,
+    #[serde(rename = "ollama_remote")]
+    OllamaRemote,
 }
 
 #[derive(Clone, Copy)]
@@ -99,18 +102,22 @@ pub(crate) enum AuthMethod {
 }
 
 impl Provider {
-    pub(crate) fn all() -> [Self; 3] {
-        [Self::Openai, Self::Claude, Self::Ollama]
+    pub(crate) fn all() -> [Self; 4] {
+        [Self::Openai, Self::Claude, Self::Ollama, Self::OllamaRemote]
     }
     pub(crate) fn requires_api_key(self) -> bool {
-        !matches!(self, Self::Ollama)
+        !matches!(self, Self::Ollama | Self::OllamaRemote)
     }
     pub(crate) fn key_url(self) -> Option<&'static str> {
         match self {
             Self::Openai => Some(OPENAI_KEYS_URL),
             Self::Claude => Some(CLAUDE_KEYS_URL),
-            Self::Ollama => None,
+            Self::Ollama | Self::OllamaRemote => None,
         }
+    }
+
+    pub(crate) fn is_ollama(self) -> bool {
+        matches!(self, Self::Ollama | Self::OllamaRemote)
     }
 }
 
@@ -120,6 +127,7 @@ impl fmt::Display for Provider {
             Self::Openai => "OpenAI",
             Self::Claude => "Claude",
             Self::Ollama => "Ollama",
+            Self::OllamaRemote => "Ollama Remote",
         })
     }
 }
@@ -203,6 +211,8 @@ pub(crate) struct ProviderConfig {
     pub(crate) model: String,
     #[serde(default = "default_temperature")]
     pub(crate) temperature: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) endpoint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,6 +235,9 @@ fn default_claude_model() -> String {
 fn default_ollama_model() -> String {
     "qwen3.5:4b".into()
 }
+fn default_ollama_remote_model() -> String {
+    "qwen3:1.7b".into()
+}
 pub(crate) fn default_temperature() -> f64 {
     1.0
 }
@@ -234,12 +247,14 @@ fn default_provider_config(provider: Provider) -> ProviderConfig {
         Provider::Openai => default_openai_model(),
         Provider::Claude => default_claude_model(),
         Provider::Ollama => default_ollama_model(),
+        Provider::OllamaRemote => default_ollama_remote_model(),
     };
     ProviderConfig {
         provider,
         api_key: None,
         model,
         temperature: default_temperature(),
+        endpoint: None,
     }
 }
 
@@ -273,6 +288,7 @@ impl Config {
                 serde_json::from_value(value).context("повреждён файл конфигурации")?;
             anyhow::ensure!(config.context_messages <= 1000, "размер окна вне диапазона");
             config.ensure_provider_defaults();
+            config.normalize_remote_endpoint()?;
             return Ok(config);
         }
         Self::load(path)
@@ -290,7 +306,9 @@ impl Config {
                 serde_json::from_value(value).context("повреждён файл конфигурации")?;
             anyhow::ensure!(config.context_messages <= 1000, "размер окна вне диапазона");
             config.mcp.validate()?;
-            if config.ensure_provider_defaults() {
+            let providers_changed = config.ensure_provider_defaults();
+            let endpoint_changed = config.normalize_remote_endpoint()?;
+            if providers_changed || endpoint_changed {
                 config
                     .save(path)
                     .context("не удалось обновить список провайдеров")?;
@@ -312,14 +330,17 @@ impl Config {
                     api_key: legacy.openai_api_key,
                     model: legacy.openai_model,
                     temperature: default_temperature(),
+                    endpoint: None,
                 },
                 ProviderConfig {
                     provider: Provider::Claude,
                     api_key: legacy.claude_api_key,
                     model: legacy.claude_model,
                     temperature: default_temperature(),
+                    endpoint: None,
                 },
                 default_provider_config(Provider::Ollama),
+                default_provider_config(Provider::OllamaRemote),
             ],
         };
         config
@@ -330,6 +351,9 @@ impl Config {
 
     pub(crate) fn save(&self, path: &Path) -> Result<()> {
         self.mcp.validate()?;
+        if let Some(endpoint) = self.endpoint(Provider::OllamaRemote) {
+            validate_ollama_remote_endpoint(endpoint)?;
+        }
         let raw = serde_json::to_vec_pretty(self)?;
         let mut options = fs::OpenOptions::new();
         options.create(true).truncate(true).write(true);
@@ -399,6 +423,23 @@ impl Config {
         Ok(())
     }
 
+    pub(crate) fn endpoint(&self, provider: Provider) -> Option<&str> {
+        self.provider(provider)
+            .and_then(|config| config.endpoint.as_deref())
+            .filter(|endpoint| !endpoint.trim().is_empty())
+    }
+
+    pub(crate) fn set_ollama_remote_endpoint(&mut self, value: &str) -> Result<()> {
+        let endpoint = normalize_ollama_remote_endpoint(value)?;
+        let config = self
+            .providers
+            .iter_mut()
+            .find(|item| item.provider == Provider::OllamaRemote)
+            .ok_or_else(|| anyhow!("не найдена конфигурация для Ollama Remote"))?;
+        config.endpoint = Some(endpoint);
+        Ok(())
+    }
+
     pub(crate) fn provider(&self, provider: Provider) -> Option<&ProviderConfig> {
         self.providers.iter().find(|item| item.provider == provider)
     }
@@ -413,6 +454,66 @@ impl Config {
         }
         changed
     }
+
+    fn normalize_remote_endpoint(&mut self) -> Result<bool> {
+        let Some(config) = self
+            .providers
+            .iter_mut()
+            .find(|item| item.provider == Provider::OllamaRemote)
+        else {
+            return Ok(false);
+        };
+        let Some(value) = config.endpoint.as_deref() else {
+            return Ok(false);
+        };
+        let normalized = normalize_ollama_remote_endpoint(value)?;
+        if normalized == value {
+            return Ok(false);
+        }
+        config.endpoint = Some(normalized);
+        Ok(true)
+    }
+}
+
+pub(crate) fn normalize_ollama_remote_endpoint(value: &str) -> Result<String> {
+    let value = value.trim();
+    anyhow::ensure!(
+        !value.is_empty(),
+        "endpoint Ollama Remote не может быть пустым"
+    );
+    let mut url = reqwest::Url::parse(value)
+        .context("endpoint Ollama Remote должен быть корректным HTTP(S) URL")?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https"),
+        "endpoint Ollama Remote должен использовать http или https"
+    );
+    anyhow::ensure!(
+        url.host_str().is_some(),
+        "в endpoint Ollama Remote нет адреса сервера"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "endpoint Ollama Remote не должен содержать credentials"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "endpoint Ollama Remote не должен содержать query или fragment"
+    );
+
+    let path = url.path().trim_end_matches('/');
+    let normalized_path = if path.is_empty() {
+        "/v1".to_owned()
+    } else if path.ends_with("/v1") {
+        path.to_owned()
+    } else {
+        format!("{path}/v1")
+    };
+    url.set_path(&normalized_path);
+    Ok(url.to_string().trim_end_matches('/').to_owned())
+}
+
+pub(crate) fn validate_ollama_remote_endpoint(value: &str) -> Result<()> {
+    normalize_ollama_remote_endpoint(value).map(|_| ())
 }
 
 impl ModesConfig {

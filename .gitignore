@@ -1,4 +1,7 @@
 /target/
+.DS_Store
+__pycache__/
+*.py[cod]
 .fox-llm.json
 *.fox-llm.json
 .fox-embeddings.json

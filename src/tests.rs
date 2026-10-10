@@ -399,6 +399,38 @@ mod suite {
     }
 
     #[test]
+    fn ollama_remote_responses_request_uses_configured_endpoint_without_authorization() {
+        let mut settings = test_agent_settings();
+        settings.provider = Provider::OllamaRemote;
+        settings.api_key = None;
+        settings.endpoint = Some("http://192.0.2.10:11435/v1".into());
+        settings.model = "qwen3:1.7b".into();
+        let payload = build_responses_payload_with_options(
+            &settings,
+            &[Message {
+                role: "user".into(),
+                content: "Назови кодовое слово: лиса".into(),
+            }],
+            &RequestOptions::default(),
+        );
+        let request = build_responses_request(&Client::new(), &settings, &payload)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request.url().as_str(),
+            "http://192.0.2.10:11435/v1/responses"
+        );
+        assert!(!request
+            .headers()
+            .contains_key(reqwest::header::AUTHORIZATION));
+        assert_eq!(payload["model"], "qwen3:1.7b");
+        assert_eq!(payload["reasoning"]["effort"], "none");
+        assert_eq!(OLLAMA_RESPONSES_URL, "http://127.0.0.1:11434/v1/responses");
+    }
+
+    #[test]
     fn ollama_errors_distinguish_model_endpoint_and_redact_details() {
         let mut settings = test_agent_settings();
         settings.provider = Provider::Ollama;
@@ -433,6 +465,37 @@ mod suite {
         assert!(!other.contains("private-marker"));
         assert!(other.contains("[скрыто]"));
         assert!(responses_connection_error(Provider::Ollama).contains("запустите"));
+    }
+
+    #[test]
+    fn ollama_remote_errors_are_distinct_and_do_not_fall_back_to_localhost() {
+        let mut settings = test_agent_settings();
+        settings.provider = Provider::OllamaRemote;
+        settings.api_key = None;
+        settings.endpoint = Some("http://192.0.2.10:11435/v1".into());
+        settings.model = "missing:1.7b".into();
+
+        let missing = ensure_responses_success(
+            reqwest::StatusCode::NOT_FOUND,
+            &json!({"error": "model missing:1.7b not found"}),
+            &settings,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(missing.contains("Ollama Remote"));
+        assert!(missing.contains("Raspberry Pi"));
+
+        let unsupported = ensure_responses_success(
+            reqwest::StatusCode::NOT_FOUND,
+            &json!({"error": "route not found"}),
+            &settings,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(unsupported.contains("Ollama Remote"));
+        assert!(unsupported.contains("0.13.3"));
+        assert!(responses_connection_error(Provider::OllamaRemote).contains("Raspberry Pi"));
+        assert!(!responses_endpoint(&settings).unwrap().contains("127.0.0.1"));
     }
 
     #[test]
@@ -1443,9 +1506,15 @@ mod suite {
 
         append_metrics_log(&path, &entry).unwrap();
         append_metrics_log(&path, &entry).unwrap();
+        let remote_entry = MetricsLogEntry {
+            provider: Provider::OllamaRemote,
+            model: "qwen3:1.7b",
+            ..entry
+        };
+        append_metrics_log(&path, &remote_entry).unwrap();
 
         let lines = fs::read_to_string(path).unwrap();
-        assert_eq!(lines.lines().count(), 2);
+        assert_eq!(lines.lines().count(), 3);
         let value: Value = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
         assert_eq!(value["session_id"], 42);
         assert_eq!(value["outcome"], "success");
@@ -1453,6 +1522,9 @@ mod suite {
         assert_eq!(value["provider"], "ollama");
         assert_eq!(value["request_input_tokens"], 10);
         assert_eq!(value["session_output_tokens"], 40);
+        let remote: Value = serde_json::from_str(lines.lines().nth(2).unwrap()).unwrap();
+        assert_eq!(remote["provider"], "ollama_remote");
+        assert_eq!(remote["model"], "qwen3:1.7b");
     }
 
     #[test]
@@ -1474,12 +1546,14 @@ mod suite {
         assert_eq!(loaded.last_provider, Some(Provider::Claude));
         assert_eq!(loaded.key(Provider::Claude), Some("secret"));
         assert_eq!(loaded.model(Provider::Claude).unwrap(), "claude-test");
-        assert_eq!(loaded.providers.len(), 3);
+        assert_eq!(loaded.providers.len(), 4);
         assert_eq!(loaded.last_mode.as_deref(), Some("Кратко"));
         assert_eq!(loaded.temperature(Provider::Claude).unwrap(), 0.7);
         assert_eq!(loaded.temperature(Provider::Openai).unwrap(), 1.0);
         assert_eq!(loaded.model(Provider::Ollama).unwrap(), "qwen3.5:4b");
         assert_eq!(loaded.key(Provider::Ollama), None);
+        assert_eq!(loaded.model(Provider::OllamaRemote).unwrap(), "qwen3:1.7b");
+        assert_eq!(loaded.endpoint(Provider::OllamaRemote), None);
     }
 
     #[test]
@@ -1502,8 +1576,10 @@ mod suite {
         .unwrap();
         let old = Config::load(&old_path).unwrap();
         assert_eq!(old.mcp, McpConfig::default());
-        assert_eq!(old.providers.len(), 3);
+        assert_eq!(old.providers.len(), 4);
         assert_eq!(old.model(Provider::Ollama).unwrap(), "qwen3.5:4b");
+        assert_eq!(old.model(Provider::OllamaRemote).unwrap(), "qwen3:1.7b");
+        assert_eq!(old.endpoint(Provider::OllamaRemote), None);
 
         let path = dir.path().join("mcp-config.json");
         let config = Config {
@@ -1603,6 +1679,8 @@ mod suite {
         assert_eq!(loaded.model(Provider::Openai).unwrap(), "gpt-test");
         assert_eq!(loaded.model(Provider::Ollama).unwrap(), "qwen3.5:4b");
         assert_eq!(loaded.key(Provider::Ollama), None);
+        assert_eq!(loaded.model(Provider::OllamaRemote).unwrap(), "qwen3:1.7b");
+        assert_eq!(loaded.endpoint(Provider::OllamaRemote), None);
         assert_eq!(
             loaded.temperature(Provider::Openai).unwrap(),
             default_temperature()
@@ -1649,6 +1727,17 @@ mod suite {
         assert_eq!(ollama.provider, Provider::Ollama);
         assert_eq!(ollama.api_key, None);
         assert_eq!(ollama.model, "qwen3.5:4b");
+        assert!(AgentSettings::from_config(&config, Provider::OllamaRemote, None).is_err());
+        config
+            .set_ollama_remote_endpoint("http://192.168.1.50:11435")
+            .unwrap();
+        let remote = AgentSettings::from_config(&config, Provider::OllamaRemote, None).unwrap();
+        assert_eq!(remote.api_key, None);
+        assert_eq!(remote.model, "qwen3:1.7b");
+        assert_eq!(
+            remote.endpoint.as_deref(),
+            Some("http://192.168.1.50:11435/v1")
+        );
 
         assert!(AgentSettings::from_config(&config, Provider::Openai, None).is_err());
         assert!(AgentSettings::from_config(&config, Provider::Claude, None).is_err());
@@ -1676,9 +1765,74 @@ mod suite {
         assert_eq!(config.key(Provider::Openai), Some("openai-secret"));
         assert_eq!(config.key(Provider::Claude), Some("claude-secret"));
         assert!(!path.exists());
-        assert_eq!(Provider::all().len(), 3);
+        assert_eq!(Provider::all().len(), 4);
         assert!(!Provider::Ollama.requires_api_key());
         assert!(Provider::Ollama.key_url().is_none());
+        assert!(!Provider::OllamaRemote.requires_api_key());
+        assert!(Provider::OllamaRemote.key_url().is_none());
+    }
+
+    #[test]
+    fn ollama_remote_provider_and_endpoint_round_trip_without_touching_local_ollama() {
+        assert_eq!(Provider::OllamaRemote.to_string(), "Ollama Remote");
+        assert_eq!(
+            serde_json::to_string(&Provider::OllamaRemote).unwrap(),
+            "\"ollama_remote\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Provider>("\"ollama_remote\"").unwrap(),
+            Provider::OllamaRemote
+        );
+
+        let mut config = Config::default();
+        let local_model = config.model(Provider::Ollama).unwrap().to_owned();
+        config
+            .set_ollama_remote_endpoint(" https://pi.example.test:11435/ ")
+            .unwrap();
+        config
+            .set_model(Provider::OllamaRemote, "fox-qwen-pi".into())
+            .unwrap();
+        assert_eq!(
+            config.endpoint(Provider::OllamaRemote),
+            Some("https://pi.example.test:11435/v1")
+        );
+        assert_eq!(config.model(Provider::Ollama).unwrap(), local_model);
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("remote-config.json");
+        config.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(
+            loaded.endpoint(Provider::OllamaRemote),
+            Some("https://pi.example.test:11435/v1")
+        );
+        assert_eq!(loaded.model(Provider::OllamaRemote).unwrap(), "fox-qwen-pi");
+        assert_eq!(loaded.model(Provider::Ollama).unwrap(), "qwen3.5:4b");
+
+        for invalid in [
+            "",
+            "pi.local:11435",
+            "ftp://pi.local/model",
+            "http://user:pass@pi.local:11435",
+            "http://pi.local:11435?token=secret",
+            "http://pi.local:11435/#fragment",
+        ] {
+            let error = normalize_ollama_remote_endpoint(invalid)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("endpoint Ollama Remote"),
+                "{invalid}: {error}"
+            );
+            assert_eq!(
+                config.endpoint(Provider::OllamaRemote),
+                Some("https://pi.example.test:11435/v1")
+            );
+        }
+        assert_eq!(
+            normalize_ollama_remote_endpoint("http://localhost:11435/v1/").unwrap(),
+            "http://localhost:11435/v1"
+        );
     }
 
     #[test]
@@ -1803,6 +1957,23 @@ mod suite {
             .to_string()
             .contains("ollama pull qwen3.5:4b"));
         assert_eq!(config.model(Provider::Ollama).unwrap(), before);
+
+        let mut remote_config = Config::default();
+        remote_config
+            .set_ollama_remote_endpoint("http://192.0.2.10:11435")
+            .unwrap();
+        let remote = build_models_request(&Client::new(), &remote_config, Provider::OllamaRemote)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(remote.url().as_str(), "http://192.0.2.10:11435/v1/models");
+        assert!(!remote
+            .headers()
+            .contains_key(reqwest::header::AUTHORIZATION));
+        assert!(model_discovery_connection_error(Provider::OllamaRemote).contains("Raspberry Pi"));
+        assert!(empty_models_error(Provider::OllamaRemote)
+            .to_string()
+            .contains("qwen3:1.7b"));
     }
 
     #[test]
@@ -1855,6 +2026,7 @@ mod suite {
         AgentSettings {
             provider: Provider::Openai,
             api_key: Some("test-key".into()),
+            endpoint: None,
             model: "test-model".into(),
             temperature: 0.5,
             instructions: Some("Отвечай кратко".into()),
@@ -2364,6 +2536,45 @@ mod suite {
         assert!(store.delete(id).unwrap());
         assert!(store.list().unwrap().is_empty());
         assert!(!store.delete(id).unwrap());
+    }
+
+    #[test]
+    fn sqlite_store_round_trips_ollama_remote_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("remote-sessions.db")).unwrap();
+        let messages = vec![Message {
+            role: "user".into(),
+            content: "Синтетический тест remote-сессии".into(),
+        }];
+        let id = store
+            .save(
+                None,
+                SessionSnapshot {
+                    provider: Provider::OllamaRemote,
+                    model: "qwen3:1.7b",
+                    mode: None,
+                    temperature: 1.0,
+                    messages: &messages,
+                    summary: "",
+                    facts: &BTreeMap::new(),
+                    summarized_count: 0,
+                    compression_strategy: CompressionStrategy::Summary,
+                    context_messages: 10,
+                    branches: &HashMap::new(),
+                    checkpoint: None,
+                    active_branch: "main",
+                    branch_pending: false,
+                    profile_id: None,
+                    task_id: None,
+                },
+            )
+            .unwrap();
+
+        let loaded = store.load(id).unwrap();
+        assert_eq!(loaded.provider, Provider::OllamaRemote);
+        assert_eq!(provider_id(loaded.provider), "ollama_remote");
+        assert_eq!(parse_provider("ollama").unwrap(), Provider::Ollama);
+        assert!(parse_provider("remote").is_err());
     }
 
     #[test]

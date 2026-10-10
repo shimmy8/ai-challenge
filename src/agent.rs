@@ -198,6 +198,7 @@ pub(crate) struct MetricsLogEntry<'a> {
 pub(crate) struct AgentSettings {
     pub(crate) provider: Provider,
     pub(crate) api_key: Option<String>,
+    pub(crate) endpoint: Option<String>,
     pub(crate) model: String,
     pub(crate) temperature: f64,
     pub(crate) instructions: Option<String>,
@@ -216,9 +217,18 @@ impl AgentSettings {
             !provider.requires_api_key() || api_key.is_some(),
             "нет ключа {provider}"
         );
+        let endpoint = config
+            .endpoint(provider)
+            .map(normalize_ollama_remote_endpoint)
+            .transpose()?;
+        anyhow::ensure!(
+            provider != Provider::OllamaRemote || endpoint.is_some(),
+            "для Ollama Remote не указан endpoint"
+        );
         Ok(Self {
             provider,
             api_key,
+            endpoint,
             model: config.model(provider)?.to_owned(),
             temperature: config.temperature(provider)?,
             compression_strategy: config.compression_strategy,

@@ -682,6 +682,7 @@ mod tests {
         let settings = isolated_ai_settings(AgentSettings {
             provider: Provider::Openai,
             api_key: Some("sk-private-marker".into()),
+            endpoint: None,
             model: "test".into(),
             temperature: 0.0,
             instructions: Some("история пользователя".into()),

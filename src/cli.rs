@@ -569,7 +569,7 @@ pub(crate) fn temperature_maximum(provider: Provider, model: &str) -> f64 {
     match provider {
         Provider::Claude => 1.0,
         Provider::Openai if is_original_gpt5_model(model) => 1.0,
-        Provider::Openai | Provider::Ollama => 2.0,
+        Provider::Openai | Provider::Ollama | Provider::OllamaRemote => 2.0,
     }
 }
 
@@ -658,6 +658,14 @@ pub(crate) fn build_models_request(
             )
             .header("anthropic-version", "2023-06-01"),
         Provider::Ollama => client.get(OLLAMA_MODELS_URL),
+        Provider::OllamaRemote => {
+            let endpoint = normalize_ollama_remote_endpoint(
+                config
+                    .endpoint(Provider::OllamaRemote)
+                    .ok_or_else(|| anyhow!("для Ollama Remote не указан endpoint"))?,
+            )?;
+            client.get(format!("{endpoint}/models"))
+        }
     })
 }
 
@@ -666,14 +674,23 @@ pub(crate) fn model_discovery_connection_error(provider: Provider) -> &'static s
         Provider::Openai => "не удалось получить модели OpenAI",
         Provider::Claude => "не удалось получить модели Anthropic",
         Provider::Ollama => "Ollama недоступна: запустите локальный сервер Ollama",
+        Provider::OllamaRemote => {
+            "Ollama Remote недоступна: проверьте Raspberry Pi и настроенный endpoint"
+        }
     }
 }
 
 pub(crate) fn empty_models_error(provider: Provider) -> anyhow::Error {
-    if provider == Provider::Ollama {
-        anyhow!("в Ollama нет установленных моделей; выполните `ollama pull qwen3.5:4b`")
-    } else {
-        anyhow!("{provider} не вернул ни одной совместимой модели")
+    match provider {
+        Provider::Ollama => {
+            anyhow!("в Ollama нет установленных моделей; выполните `ollama pull qwen3.5:4b`")
+        }
+        Provider::OllamaRemote => anyhow!(
+            "в Ollama Remote нет установленных моделей; установите `qwen3:1.7b` на удалённом сервере"
+        ),
+        Provider::Openai | Provider::Claude => {
+            anyhow!("{provider} не вернул ни одной совместимой модели")
+        }
     }
 }
 
@@ -695,7 +712,10 @@ pub(crate) fn parse_model_ids(body: &Value, provider: Provider) -> Result<Vec<St
 }
 
 pub(crate) fn model_supports_responses_api(provider: Provider, model: &str) -> bool {
-    if matches!(provider, Provider::Claude | Provider::Ollama) {
+    if matches!(
+        provider,
+        Provider::Claude | Provider::Ollama | Provider::OllamaRemote
+    ) {
         return true;
     }
 
@@ -843,6 +863,45 @@ pub(crate) fn choose_provider() -> Result<Provider> {
         .default(0)
         .interact()?;
     Ok(choices[selected])
+}
+
+pub(crate) fn configure_ollama_remote_endpoint_if_needed(
+    config: &mut Config,
+    provider: Provider,
+    path: &Path,
+) -> Result<()> {
+    if provider != Provider::OllamaRemote || config.endpoint(Provider::OllamaRemote).is_some() {
+        return Ok(());
+    }
+    println!(
+        "\nДля {} нужен адрес сервиса Raspberry Pi.",
+        style(provider).cyan().bold()
+    );
+    change_ollama_remote_endpoint(config, path)
+}
+
+pub(crate) fn change_ollama_remote_endpoint(config: &mut Config, path: &Path) -> Result<()> {
+    let theme = ColorfulTheme::default();
+    let mut input = Input::<String>::with_theme(&theme)
+        .with_prompt("Endpoint Ollama Remote, например http://raspberrypi.local:11435/v1");
+    if let Some(current) = config.endpoint(Provider::OllamaRemote) {
+        input = input.default(current.to_owned());
+    }
+    let endpoint = input
+        .validate_with(|value: &String| -> std::result::Result<(), String> {
+            normalize_ollama_remote_endpoint(value)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .interact_text()?;
+    config.set_ollama_remote_endpoint(&endpoint)?;
+    config.save(path)?;
+    println!(
+        "{} {}\n",
+        style("Endpoint Ollama Remote сохранён:").green(),
+        style(config.endpoint(Provider::OllamaRemote).unwrap_or_default()).cyan()
+    );
+    Ok(())
 }
 
 pub(crate) fn authorize_if_needed(

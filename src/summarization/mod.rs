@@ -1025,6 +1025,7 @@ async fn run_case(
     let settings = AgentSettings {
         provider: Provider::Ollama,
         api_key: None,
+        endpoint: None,
         model: profile.model.clone(),
         temperature: profile.temperature,
         instructions: Some(prompt_for(profile.prompt).to_owned()),

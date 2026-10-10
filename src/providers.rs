@@ -28,7 +28,9 @@ pub(crate) async fn send_request(
     match settings.provider {
         Provider::Openai => send_openai(client, settings, history, options).await,
         Provider::Claude => send_claude(client, settings, history, options).await,
-        Provider::Ollama => send_ollama(client, settings, history, options).await,
+        Provider::Ollama | Provider::OllamaRemote => {
+            send_ollama(client, settings, history, options).await
+        }
     }
 }
 
@@ -96,10 +98,19 @@ pub(crate) fn parse_responses_answer(settings: &AgentSettings, body: &Value) -> 
     })
 }
 
-pub(crate) fn responses_endpoint(provider: Provider) -> Result<&'static str> {
-    match provider {
-        Provider::Openai => Ok("https://api.openai.com/v1/responses"),
-        Provider::Ollama => Ok(OLLAMA_RESPONSES_URL),
+pub(crate) fn responses_endpoint(settings: &AgentSettings) -> Result<String> {
+    match settings.provider {
+        Provider::Openai => Ok("https://api.openai.com/v1/responses".into()),
+        Provider::Ollama => Ok(OLLAMA_RESPONSES_URL.into()),
+        Provider::OllamaRemote => {
+            let endpoint = normalize_ollama_remote_endpoint(
+                settings
+                    .endpoint
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("для Ollama Remote не указан endpoint"))?,
+            )?;
+            Ok(format!("{endpoint}/responses"))
+        }
         Provider::Claude => bail!("Claude не использует Responses API"),
     }
 }
@@ -109,9 +120,7 @@ pub(crate) fn build_responses_request(
     settings: &AgentSettings,
     payload: &Value,
 ) -> Result<reqwest::RequestBuilder> {
-    let mut request = client
-        .post(responses_endpoint(settings.provider)?)
-        .json(payload);
+    let mut request = client.post(responses_endpoint(settings)?).json(payload);
     if settings.provider.requires_api_key() {
         let api_key = settings
             .api_key
@@ -126,6 +135,9 @@ pub(crate) fn responses_connection_error(provider: Provider) -> &'static str {
     match provider {
         Provider::Openai => "не удалось подключиться к OpenAI",
         Provider::Ollama => "Ollama недоступна: запустите локальный сервер Ollama",
+        Provider::OllamaRemote => {
+            "Ollama Remote недоступна: проверьте Raspberry Pi и настроенный endpoint"
+        }
         Provider::Claude => "не удалось подключиться к Anthropic",
     }
 }
@@ -140,9 +152,10 @@ async fn read_responses_response(
         .await
         .context("не удалось прочитать ответ API")?;
     let body: Value = serde_json::from_str(&text).map_err(|_| {
-        if settings.provider == Provider::Ollama {
+        if settings.provider.is_ollama() {
             anyhow!(
-                "Ollama вернула несовместимый ответ; обновите Ollama до версии с Responses API (0.13.3 или новее)"
+                "{} вернула несовместимый ответ; обновите Ollama до версии с Responses API (0.13.3 или новее)",
+                settings.provider
             )
         } else {
             anyhow!("API вернул не JSON: {}", truncate(&text, 300))
@@ -160,7 +173,7 @@ pub(crate) fn ensure_responses_success(
     if status.is_success() {
         return Ok(());
     }
-    if settings.provider != Provider::Ollama {
+    if !settings.provider.is_ollama() {
         return ensure_success(status, body, &settings.provider.to_string());
     }
     let message = api_error_message(body);
@@ -170,17 +183,27 @@ pub(crate) fn ensure_responses_success(
             || normalized.contains("not exist")
             || normalized.contains("pull"))
     {
+        if settings.provider == Provider::Ollama {
+            bail!(
+                "модель Ollama '{}' не установлена; выполните `ollama pull {}` или выберите установленную модель",
+                settings.model,
+                settings.model
+            );
+        }
         bail!(
-            "модель Ollama '{}' не установлена; выполните `ollama pull {}` или выберите установленную модель",
-            settings.model,
+            "модель Ollama Remote '{}' не установлена на удалённом сервере; установите её на Raspberry Pi или выберите доступную модель",
             settings.model
         );
     }
     if status == StatusCode::NOT_FOUND {
-        bail!("Ollama не поддерживает Responses API; обновите Ollama до версии 0.13.3 или новее");
+        bail!(
+            "{} не поддерживает Responses API; обновите Ollama до версии 0.13.3 или новее",
+            settings.provider
+        );
     }
     bail!(
-        "Ollama вернула {status}: {}",
+        "{} вернула {status}: {}",
+        settings.provider,
         redact_secret(message, settings.api_key.as_deref())
     )
 }
@@ -258,9 +281,7 @@ pub(crate) fn build_responses_payload_with_options(
                 .collect(),
         );
     }
-    if settings.provider == Provider::Ollama
-        || supports_temperature_with_reasoning_none(&settings.model)
-    {
+    if settings.provider.is_ollama() || supports_temperature_with_reasoning_none(&settings.model) {
         payload["reasoning"] = json!({ "effort": "none" });
     }
     if let Some(instructions) = &settings.instructions {
