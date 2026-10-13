@@ -1,0 +1,152 @@
+name: AI code review
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      # This job runs untrusted PR code. Never add secrets or write permissions here.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run tests
+        id: cargo_test
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          cargo test 2>&1 | tee cargo-test.log
+          code=${PIPESTATUS[0]}
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
+      - name: Build bounded test report
+        if: always()
+        shell: bash
+        env:
+          TEST_OUTCOME: ${{ steps.cargo_test.outcome }}
+          TEST_EXIT_CODE: ${{ steps.cargo_test.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$TEST_EXIT_CODE" ]] || [[ ! -f cargo-test.log ]]; then
+            status=infrastructure_error; code=null; infra='"cargo test не удалось достоверно запустить"'; touch cargo-test.log
+          elif [[ "$TEST_EXIT_CODE" == "0" ]]; then
+            status=passed; code=0; infra=null
+          else
+            status=failed; code="$TEST_EXIT_CODE"; infra=null
+          fi
+          perl -CSD -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/[^\x09\x0A\x20-\x7E\x{80}-\x{10FFFF}]//g' cargo-test.log > cargo-test.clean.log
+          jq -Rn --arg status "$status" --argjson exit_code "$code" --argjson infrastructure_message "$infra" --rawfile log cargo-test.clean.log '
+            {status:$status, exit_code:$exit_code,
+             failed_tests: ([($log | split("\n")[]) | capture("^test (?<name>[^ ]+) \\.\\.\\. FAILED$").name?] | map(select(. != null)) | unique | .[:200]),
+             log_excerpt: ($log[0:100000]), truncated: (($log | length) > 100000),
+             infrastructure_message:$infrastructure_message}' > test-report.json
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-review-test-report
+          path: test-report.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Preserve failed test status
+        if: always() && steps.cargo_test.outcome != 'success'
+        run: exit 1
+
+  review:
+    needs: tests
+    if: always() && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # The privileged job checks out only trusted base code and never executes PR files.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ai-review-test-report
+          path: .ai-review-artifact
+      - name: Validate test report artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          report=.ai-review-artifact/test-report.json
+          if [[ ! -f "$report" ]] || [[ $(wc -c < "$report") -gt 500000 ]] || ! jq -e '
+            type == "object" and
+            ((keys_unsorted - ["status","exit_code","failed_tests","log_excerpt","truncated","infrastructure_message"]) | length == 0) and
+            (.status == "passed" or .status == "failed" or .status == "infrastructure_error") and
+            (.exit_code == null or (.exit_code | type == "number")) and
+            (.failed_tests | type == "array") and (.failed_tests | length <= 200) and
+            all(.failed_tests[]; type == "string" and length <= 300) and
+            (.log_excerpt | type == "string") and (.log_excerpt | length <= 100000) and
+            (.truncated | type == "boolean") and
+            (.infrastructure_message == null or (.infrastructure_message | type == "string")) and
+            (if .status == "passed" then .exit_code == 0
+             elif .status == "failed" then (.exit_code | type == "number") and .exit_code != 0
+             else (.infrastructure_message | type == "string") end)
+          ' "$report" >/dev/null; then
+            mkdir -p .ai-review-artifact
+            jq -n '{status:"infrastructure_error",exit_code:null,failed_tests:[],log_excerpt:"",truncated:false,infrastructure_message:"test-report artifact отсутствует или повреждён"}' > "$report"
+          fi
+      - name: Build trusted reviewer
+        run: cargo build --release
+      - name: Generate AI review
+        id: review
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          FOX_REVIEW_PROVIDER: ${{ vars.FOX_REVIEW_PROVIDER || 'openai' }}
+          FOX_REVIEW_MODEL: ${{ vars.FOX_REVIEW_MODEL }}
+          FOX_REVIEW_EMBEDDING_MODEL: ${{ vars.FOX_REVIEW_EMBEDDING_MODEL }}
+          FOX_REVIEW_MAX_FILES: ${{ vars.FOX_REVIEW_MAX_FILES || '50' }}
+          FOX_REVIEW_MAX_DIFF_CHARS: ${{ vars.FOX_REVIEW_MAX_DIFF_CHARS || '300000' }}
+          FOX_REVIEW_MAX_FILE_CHARS: ${{ vars.FOX_REVIEW_MAX_FILE_CHARS || '40000' }}
+          FOX_REVIEW_BATCH_CHARS: ${{ vars.FOX_REVIEW_BATCH_CHARS || '60000' }}
+          FOX_REVIEW_MAX_FINDINGS: ${{ vars.FOX_REVIEW_MAX_FINDINGS || '30' }}
+        run: |
+          target/release/fox-llm review-pr \
+            --repository '${{ github.repository }}' \
+            --pull-request '${{ github.event.pull_request.number }}' \
+            --test-report .ai-review-artifact/test-report.json \
+            --output review.md \
+            --json-output review.json
+      - name: Create or update sticky review comment
+        if: always() && steps.review.outcome == 'success'
+        uses: actions/github-script@v7
+        env:
+          REVIEW_PATH: review.md
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync(process.env.REVIEW_PATH, 'utf8');
+            const { publishReview } = require(process.env.GITHUB_WORKSPACE + '/.github/scripts/publish-review.js');
+            await publishReview({ github, context, core, body });
+      - name: Report reviewer failure
+        if: always() && steps.review.outcome != 'success'
+        run: echo 'AI reviewer failed; an existing sticky comment was left unchanged.' >> "$GITHUB_STEP_SUMMARY"
+
+  fork-notice:
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - run: echo 'AI review skipped for a fork pull request; no credentials were provided.' >> "$GITHUB_STEP_SUMMARY"

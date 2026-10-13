@@ -9,6 +9,7 @@ mod metrics;
 mod model;
 mod providers;
 mod rag;
+mod review;
 mod sessions;
 mod summarization;
 mod tests;
@@ -22,6 +23,7 @@ pub(crate) use metrics::*;
 pub(crate) use model::*;
 pub(crate) use providers::*;
 pub(crate) use rag::*;
+pub(crate) use review::*;
 pub(crate) use sessions::*;
 pub(crate) use summarization::*;
 
