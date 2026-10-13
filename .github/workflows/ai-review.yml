@@ -80,6 +80,17 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      - name: Restore trusted reviewer build cache
+        id: cargo_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+          key: ${{ runner.os }}-fox-review-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-fox-review-cargo-
       - name: Compute review cache namespace
         id: cache_namespace
         shell: bash
@@ -136,6 +147,15 @@ jobs:
           fi
       - name: Build trusted reviewer
         run: cargo build --release --package fox-review --bin fox-review
+      - name: Save trusted reviewer build cache
+        if: steps.cargo_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+          key: ${{ runner.os }}-fox-review-cargo-${{ hashFiles('Cargo.lock') }}
       - name: Generate AI review
         id: review
         env:

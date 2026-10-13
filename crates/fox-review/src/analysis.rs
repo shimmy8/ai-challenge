@@ -1403,6 +1403,13 @@ mod tests {
         assert!(workflow.contains("publish-review.js"));
         assert!(workflow.contains("cargo build --release --package fox-review --bin fox-review"));
         assert!(workflow.contains("target/release/fox-review"));
+        assert!(workflow.contains("Restore trusted reviewer build cache"));
+        assert!(workflow.contains("Save trusted reviewer build cache"));
+        assert!(workflow.contains("~/.cargo/registry"));
+        assert!(workflow.contains("~/.cargo/git"));
+        assert!(workflow.contains("target/release"));
+        assert!(workflow.contains("runner.os }}-fox-review-cargo-${{ hashFiles('Cargo.lock')"));
+        assert!(workflow.contains("steps.cargo_cache.outputs.cache-hit != 'true'"));
         assert!(workflow.contains("actions/cache/restore@v4"));
         assert!(workflow.contains("actions/cache/save@v4"));
         assert!(workflow.contains("steps.cache_after.outputs.changed == 'true'"));
