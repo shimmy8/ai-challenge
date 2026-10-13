@@ -17,12 +17,31 @@ pub(crate) const DEFAULT_RAG_TOP_K: usize = 5;
 pub(crate) const DEFAULT_RAG_MIN_SIMILARITY: f32 = 0.40;
 pub(crate) const DEFAULT_RAG_CONTEXT_CHARS: usize = 6000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RetrievalSourceScope {
+    All,
+    ProjectDocumentation,
+}
+
+impl RetrievalSourceScope {
+    fn allows(self, source: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::ProjectDocumentation => {
+                source == "README.md" || source.starts_with("openspec/specs/")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub(crate) struct RetrievalConfig {
     pub(crate) candidate_k: usize,
     pub(crate) final_k: usize,
     pub(crate) min_similarity: f32,
     pub(crate) context_chars: usize,
+    pub(crate) source_scope: RetrievalSourceScope,
 }
 
 impl Default for RetrievalConfig {
@@ -32,6 +51,7 @@ impl Default for RetrievalConfig {
             final_k: DEFAULT_RAG_TOP_K,
             min_similarity: DEFAULT_RAG_MIN_SIMILARITY,
             context_chars: DEFAULT_RAG_CONTEXT_CHARS,
+            source_scope: RetrievalSourceScope::All,
         }
     }
 }
@@ -171,7 +191,11 @@ pub(crate) async fn retrieve_baseline_with_provider(
     );
     let query = &batch.vectors[0];
     validate_vector(query, descriptor)?;
-    let chunks = IndexStore::open_read_only(index_path)?.load_structural_chunks(descriptor)?;
+    let chunks = IndexStore::open_read_only(index_path)?
+        .load_structural_chunks(descriptor)?
+        .into_iter()
+        .filter(|chunk| config.source_scope.allows(&chunk.source))
+        .collect::<Vec<_>>();
     let mut scored = chunks
         .into_iter()
         .map(|chunk| {
@@ -238,7 +262,11 @@ pub(crate) async fn retrieve_enhanced_with_provider(
     validate_vector(original, descriptor)?;
     validate_vector(rewritten, descriptor)?;
     let query_tokens = significant_tokens(&format!("{} {}", question, rewrite.query));
-    let chunks = IndexStore::open_read_only(index_path)?.load_structural_chunks(descriptor)?;
+    let chunks = IndexStore::open_read_only(index_path)?
+        .load_structural_chunks(descriptor)?
+        .into_iter()
+        .filter(|chunk| config.source_scope.allows(&chunk.source))
+        .collect::<Vec<_>>();
     let mut candidates = chunks
         .into_iter()
         .map(|chunk| {
@@ -479,13 +507,22 @@ mod tests {
         vector: Vec<f32>,
         content: &str,
     ) -> (crate::rag::Chunk, crate::rag::index::StoredEmbedding) {
+        chunk_from_source(id, "doc.md", vector, content)
+    }
+
+    fn chunk_from_source(
+        id: &str,
+        source: &str,
+        vector: Vec<f32>,
+        content: &str,
+    ) -> (crate::rag::Chunk, crate::rag::index::StoredEmbedding) {
         use crate::rag::IndexStrategy;
         let hash = format!("h-{id}");
         (
             crate::rag::Chunk {
                 chunk_id: id.into(),
                 strategy: IndexStrategy::Structural,
-                source: "doc.md".into(),
+                source: source.into(),
                 title: id.into(),
                 section: "Section".into(),
                 ordinal: 0,
@@ -506,7 +543,7 @@ mod tests {
         entries: Vec<(crate::rag::Chunk, crate::rag::index::StoredEmbedding)>,
     ) -> (tempfile::TempDir, std::path::PathBuf) {
         use crate::rag::{ComparisonReport, Document, IndexStrategy, StrategyMetrics};
-        use std::collections::BTreeMap;
+        use std::collections::{BTreeMap, BTreeSet};
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("index.db");
         let mut store = IndexStore::open(&path).unwrap();
@@ -515,14 +552,21 @@ mod tests {
             .map(|entry| entry.0.clone())
             .collect::<Vec<_>>();
         let embeddings = entries.into_iter().map(|entry| entry.1).collect::<Vec<_>>();
-        let document = Document {
-            source: "doc.md".into(),
-            title: "Doc".into(),
-            content: "content".into(),
-            document_hash: "dh".into(),
-            byte_len: 7,
-            char_len: 7,
-        };
+        let documents = chunks
+            .iter()
+            .map(|chunk| chunk.source.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .enumerate()
+            .map(|(index, source)| Document {
+                source,
+                title: format!("Doc {index}"),
+                content: "content".into(),
+                document_hash: format!("dh-{index}"),
+                byte_len: 7,
+                char_len: 7,
+            })
+            .collect::<Vec<_>>();
         let comparison = ComparisonReport {
             provider: "fake".into(),
             endpoint_origin: "local://fake".into(),
@@ -548,7 +592,7 @@ mod tests {
         };
         store
             .publish(
-                &[document],
+                &documents,
                 &chunks,
                 &embeddings,
                 &[IndexStrategy::Structural],
@@ -689,6 +733,68 @@ mod tests {
             .unwrap(),
             RetrievalOutcome::NoRelevantContext(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn project_scope_filters_sources_before_candidate_limit() {
+        let (_directory, path) = index(vec![
+            chunk_from_source(
+                "report",
+                "reports/day31/README.md",
+                vec![1.0, 0.0],
+                "report",
+            ),
+            chunk_from_source(
+                "archive",
+                "openspec/changes/archive/old/design.md",
+                vec![1.0, 0.0],
+                "archive",
+            ),
+            chunk_from_source("readme", "README.md", vec![0.9, 0.1], "readme"),
+            chunk_from_source(
+                "spec",
+                "openspec/specs/rag-query/spec.md",
+                vec![0.8, 0.2],
+                "spec",
+            ),
+        ]);
+        let provider = Provider {
+            descriptor: descriptor(),
+            vectors: vec![vec![1.0, 0.0], vec![1.0, 0.0]],
+        };
+        let rewriter = Rewriter(RewriteResult {
+            query: "project".into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            duration_ms: 0,
+        });
+
+        let RetrievalOutcome::Retrieved(result) = retrieve_enhanced_with_provider(
+            &path,
+            "project",
+            &provider,
+            &rewriter,
+            RetrievalConfig {
+                candidate_k: 2,
+                final_k: 2,
+                min_similarity: -1.0,
+                source_scope: RetrievalSourceScope::ProjectDocumentation,
+                ..RetrievalConfig::default()
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected project documents")
+        };
+
+        assert_eq!(
+            result
+                .chunks
+                .iter()
+                .map(|chunk| chunk.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["README.md", "openspec/specs/rag-query/spec.md"]
+        );
     }
 
     #[test]

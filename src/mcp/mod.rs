@@ -23,6 +23,7 @@ use std::{
 mod calendar;
 mod github;
 mod group_servers;
+mod help_runtime;
 mod orchestrator;
 mod pipeline;
 mod report;
@@ -30,12 +31,14 @@ mod scheduler;
 mod server;
 mod telegram;
 mod tools;
+mod workspace;
 pub(crate) use calendar::load_mcp_env_file;
 pub(crate) use calendar::{
     CalDavClient, CalendarDigestEvent, CalendarEventRequest, CalendarEventResult,
 };
 pub(crate) use github::*;
 pub(crate) use group_servers::*;
+pub(crate) use help_runtime::*;
 pub(crate) use orchestrator::*;
 pub(crate) use pipeline::*;
 pub(crate) use report::*;
@@ -43,6 +46,7 @@ pub(crate) use scheduler::*;
 pub(crate) use server::run_mcp_server;
 pub(crate) use telegram::*;
 pub(crate) use tools::*;
+pub(crate) use workspace::*;
 
 pub(crate) const MCP_SERVER_URL: &str = "http://127.0.0.1:8000/mcp";
 
@@ -238,6 +242,12 @@ impl McpRouter {
         self.routes.is_empty()
     }
 
+    pub(crate) async fn close(self) {
+        for (_, session) in self.sessions {
+            session.close().await;
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn route(&self, public_name: &str) -> Option<&ToolRoute> {
         self.routes.get(public_name)
@@ -334,6 +344,9 @@ pub(crate) fn log_local_call(
     outcome: Option<ToolOutcome>,
     duration_ms: Option<u128>,
 ) {
+    if !should_log_local_call(server_id) {
+        return;
+    }
     StdoutMcpCallLogger.log(&McpCallEvent {
         event,
         correlation_id,
@@ -343,6 +356,10 @@ pub(crate) fn log_local_call(
         outcome,
         duration_ms,
     });
+}
+
+fn should_log_local_call(server_id: &str) -> bool {
+    server_id != "project-help"
 }
 
 impl McpSession {
@@ -721,6 +738,13 @@ mod tests {
     }
 
     #[test]
+    fn project_help_server_calls_are_not_written_to_stdout() {
+        assert!(!should_log_local_call("project-help"));
+        assert!(should_log_local_call("workspace"));
+        assert!(should_log_local_call("github"));
+    }
+
+    #[test]
     fn removes_duplicate_and_stale_disabled_tools() {
         let available = vec![McpToolInfo {
             name: "echo".into(),
@@ -801,7 +825,10 @@ mod tests {
                 McpServerKind::Reporting,
                 vec!["calculate_github_metrics", "render_github_report"],
             ),
-            (McpServerKind::Workspace, vec!["save_report"]),
+            (
+                McpServerKind::Workspace,
+                vec!["codegraph_explore", "git_current_branch", "save_report"],
+            ),
             (McpServerKind::Calendar, vec!["create_event", "list_events"]),
         ];
         for (kind, expected) in cases {
@@ -828,6 +855,15 @@ mod tests {
                 expected.into_iter().collect::<BTreeSet<_>>()
             );
             assert!(tools.iter().all(|tool| tool.name != "echo"));
+            if kind == McpServerKind::Workspace {
+                assert!(tools
+                    .iter()
+                    .filter(|tool| matches!(
+                        tool.name.as_str(),
+                        "git_current_branch" | "codegraph_explore"
+                    ))
+                    .all(|tool| tool.read_only && !tool.destructive));
+            }
             task.abort();
         }
     }

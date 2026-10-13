@@ -61,6 +61,7 @@ pub(crate) fn parse_rag_eval_options(args: &[String]) -> Result<RagEvalOptions> 
         final_k: final_k.unwrap_or(defaults.final_k),
         min_similarity: min_similarity.unwrap_or(defaults.min_similarity),
         context_chars: defaults.context_chars,
+        source_scope: defaults.source_scope,
     }
     .validate()?;
     Ok(RagEvalOptions {

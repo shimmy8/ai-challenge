@@ -23,7 +23,11 @@ pub(crate) fn discover_documents(root: &Path, sources: &[PathBuf]) -> Result<Vec
         .canonicalize()
         .with_context(|| format!("не удалось определить корень {}", root.display()))?;
     let requested = if sources.is_empty() {
-        vec![root.join("reports"), root.join("openspec/specs")]
+        vec![
+            root.join("README.md"),
+            root.join("reports"),
+            root.join("openspec/specs"),
+        ]
     } else {
         sources
             .iter()
@@ -179,5 +183,42 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         fs::write(outside.path().join("secret.md"), "secret").unwrap();
         assert!(discover_documents(directory.path(), &[outside.path().into()]).is_err());
+    }
+
+    #[test]
+    fn default_discovery_includes_readme_reports_and_current_specs() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir_all(directory.path().join("reports/day31")).unwrap();
+        fs::create_dir_all(directory.path().join("openspec/specs/project-help")).unwrap();
+        fs::create_dir_all(directory.path().join("openspec/changes/archive/old")).unwrap();
+        fs::write(directory.path().join("README.md"), "# Project").unwrap();
+        fs::write(directory.path().join("reports/day31/README.md"), "# Report").unwrap();
+        fs::write(
+            directory.path().join("openspec/specs/project-help/spec.md"),
+            "# Spec",
+        )
+        .unwrap();
+        fs::write(
+            directory
+                .path()
+                .join("openspec/changes/archive/old/proposal.md"),
+            "# Archived",
+        )
+        .unwrap();
+
+        let sources = discover_documents(directory.path(), &[])
+            .unwrap()
+            .into_iter()
+            .map(|document| document.source)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            sources,
+            vec![
+                "README.md",
+                "openspec/specs/project-help/spec.md",
+                "reports/day31/README.md",
+            ]
+        );
     }
 }

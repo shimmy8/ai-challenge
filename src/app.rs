@@ -91,7 +91,11 @@ impl ToolApproval for InteractiveToolApproval {
 
 #[cfg(test)]
 mod approval_tests {
-    use super::parse_confirmation;
+    use super::{
+        parse_confirmation, retrieval_config_for_request, retrieval_context_for_request,
+        should_retrieve_for_request,
+    };
+    use crate::{ActiveMemory, Message, RetrievalSourceScope};
 
     #[test]
     fn mcp_confirmation_accepts_russian_and_english_answers() {
@@ -103,6 +107,32 @@ mod approval_tests {
         }
         assert_eq!(parse_confirmation(""), None);
         assert_eq!(parse_confirmation("возможно"), None);
+    }
+
+    #[test]
+    fn project_help_forces_scoped_retrieval_when_regular_rag_is_off() {
+        assert!(should_retrieve_for_request(true, false, false));
+        assert!(!should_retrieve_for_request(false, false, true));
+        assert_eq!(
+            retrieval_config_for_request(true).source_scope,
+            RetrievalSourceScope::ProjectDocumentation
+        );
+        assert_eq!(
+            retrieval_config_for_request(false).source_scope,
+            RetrievalSourceScope::All
+        );
+    }
+
+    #[test]
+    fn project_help_rewrite_context_ignores_parent_history_and_memory() {
+        let history = vec![Message {
+            role: "user".into(),
+            content: "предыдущий вопрос".into(),
+        }];
+        let ordinary = retrieval_context_for_request(false, &history, &ActiveMemory::default());
+        let project = retrieval_context_for_request(true, &history, &ActiveMemory::default());
+        assert_eq!(ordinary.recent_user_messages, ["предыдущий вопрос"]);
+        assert_eq!(project, crate::RetrievalContext::default());
     }
 }
 
@@ -178,7 +208,7 @@ pub(crate) async fn run() -> Result<()> {
         client.clone(),
         AgentSettings::from_config(&config, provider, initial_mode)?,
     );
-    let initial_tool_runtime = match build_mcp_runtime(&config).await {
+    let mut tool_runtime = match build_mcp_runtime(&config).await {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!(
@@ -188,7 +218,19 @@ pub(crate) async fn run() -> Result<()> {
             None
         }
     };
-    agents.set_tool_runtime(initial_tool_runtime, Arc::new(InteractiveToolApproval));
+    let root = std::env::current_dir()?.canonicalize()?;
+    let help_mcp_runtime = match HelpMcpRuntime::start(root.clone()).await {
+        Ok(runtime) => Some(runtime),
+        Err(error) => {
+            eprintln!(
+                "{} {error:#}",
+                style("Project help MCP недоступен; останется документационный контекст:").yellow()
+            );
+            None
+        }
+    };
+    let help_tool_runtime = help_mcp_runtime.as_ref().map(HelpMcpRuntime::executor);
+    agents.set_tool_runtime(tool_runtime.clone(), Arc::new(InteractiveToolApproval));
     agents.set_invariants(sessions.list_invariants()?);
     agents.set_memory(ActiveMemory {
         long_term_facts: sessions.list_memory_entries()?,
@@ -234,6 +276,8 @@ pub(crate) async fn run() -> Result<()> {
         .to_owned();
         let _ = editor.add_history_entry(&input);
         let mut automatic_input = None;
+        let mut project_help = false;
+        let help_command = parse_help_command(&input);
         match input.as_str() {
             "/quit" => break,
             "/new" => {
@@ -496,7 +540,11 @@ pub(crate) async fn run() -> Result<()> {
                 }
                 match build_mcp_runtime(&config).await {
                     Ok(runtime) => {
-                        agents.set_tool_runtime(runtime, Arc::new(InteractiveToolApproval))
+                        tool_runtime = runtime;
+                        agents.set_tool_runtime(
+                            tool_runtime.clone(),
+                            Arc::new(InteractiveToolApproval),
+                        )
                     }
                     Err(error) => eprintln!(
                         "{} {error:#}",
@@ -677,8 +725,15 @@ pub(crate) async fn run() -> Result<()> {
                 }
                 continue;
             }
+            _command if matches!(help_command, HelpCommand::Ask(_)) => {
+                let HelpCommand::Ask(question) = help_command else {
+                    unreachable!();
+                };
+                project_help = true;
+                automatic_input = Some(question.to_owned());
+            }
             "/help" => {
-                print_help(config.compression_strategy == CompressionStrategy::Branching);
+                print_help(config.compression_strategy == CompressionStrategy::Branching)?;
                 continue;
             }
             command if command.starts_with('/') => {
@@ -690,14 +745,18 @@ pub(crate) async fn run() -> Result<()> {
         let user_question = automatic_input.is_none();
         let mut request_input = automatic_input.unwrap_or(input);
         let mut rag_no_context = false;
-        let mut rag_chunks: Option<Vec<RetrievedChunk>> = if should_retrieve_rag(
+        let mut project_help_warnings = Vec::new();
+        let mut rag_chunks: Option<Vec<RetrievedChunk>> = if should_retrieve_for_request(
+            project_help,
             rag_enabled,
             user_question,
         ) {
-            let root = std::env::current_dir()?.canonicalize()?;
             let retrieval_memory = agents.memory();
-            let retrieval_context =
-                RetrievalContext::from_state(agents.persisted_history(), &retrieval_memory);
+            let retrieval_context = retrieval_context_for_request(
+                project_help,
+                agents.persisted_history(),
+                &retrieval_memory,
+            );
             let agent = agents
                 .agents
                 .first()
@@ -713,7 +772,7 @@ pub(crate) async fn run() -> Result<()> {
                 agent.request_client.clone(),
                 agent.settings.clone(),
                 retrieval_context,
-                RetrievalConfig::default(),
+                retrieval_config_for_request(project_help),
             )
             .await
             {
@@ -739,12 +798,24 @@ pub(crate) async fn run() -> Result<()> {
                         ))
                         .yellow()
                     );
-                    rag_no_context = true;
+                    if project_help {
+                        project_help_warnings.push(
+                            "В README.md и openspec/specs не найден релевантный контекст."
+                                .to_owned(),
+                        );
+                    } else {
+                        rag_no_context = true;
+                    }
                     None
                 }
                 Err(error) => {
-                    eprintln!("{} {error:#}\n", style("RAG-запрос не выполнен:").red());
-                    continue 'interactive;
+                    if project_help {
+                        project_help_warnings.push(format!("Проектный RAG недоступен: {error:#}"));
+                        None
+                    } else {
+                        eprintln!("{} {error:#}\n", style("RAG-запрос не выполнен:").red());
+                        continue 'interactive;
+                    }
                 }
             }
         } else {
@@ -757,8 +828,57 @@ pub(crate) async fn run() -> Result<()> {
                 .agents
                 .first()
                 .is_some_and(|agent| agent.branch_pending);
-            let mut results = if rag_no_context {
-                agents.record_all_local(&request_input, NO_RELEVANT_CONTEXT_ANSWER)
+            let mut results = if project_help {
+                let started = Instant::now();
+                let outcome = run_project_help_subagent(
+                    &agents.agents[0],
+                    help_tool_runtime.clone(),
+                    &request_input,
+                    rag_chunks.take().unwrap_or_default(),
+                )
+                .await;
+                match outcome {
+                    Ok(outcome) => {
+                        project_help_warnings.extend(outcome.warnings);
+                        for warning in &project_help_warnings {
+                            eprintln!("{} {warning}", style("Контекст /help ограничен:").yellow());
+                        }
+                        if let Some(answer) = outcome.answer {
+                            let mut recorded =
+                                agents.record_all_local(&request_input, &answer.text);
+                            if let Some(run) = recorded.first_mut() {
+                                run.elapsed = started.elapsed();
+                                run.input_tokens = answer.input_tokens;
+                                run.output_tokens = answer.output_tokens;
+                                run.result = Ok(answer);
+                            }
+                            recorded
+                        } else {
+                            agents.record_all_local(
+                                &request_input,
+                                PROJECT_CONTEXT_UNAVAILABLE_ANSWER,
+                            )
+                        }
+                    }
+                    Err(error) => vec![AgentRunResult {
+                        agent_id: 1,
+                        elapsed: started.elapsed(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        session_input_tokens: 0,
+                        session_output_tokens: 0,
+                        result: Err(error),
+                    }],
+                }
+            } else if rag_no_context {
+                agents.record_all_local(
+                    &request_input,
+                    if project_help {
+                        PROJECT_CONTEXT_UNAVAILABLE_ANSWER
+                    } else {
+                        NO_RELEVANT_CONTEXT_ANSWER
+                    },
+                )
             } else if let Some(chunks) = rag_chunks.as_ref() {
                 let prompt = build_rag_prompt(&request_input, chunks)?;
                 agents.ask_all_rag(&request_input, &prompt, chunks).await
@@ -849,7 +969,7 @@ pub(crate) async fn run() -> Result<()> {
                             "{} {}\n{}\n",
                             style("✓").green().bold(),
                             style(format!("Агент {}", run.agent_id)).magenta().bold(),
-                            answer.text
+                            format_agent_output(&answer.text)
                         );
                         if let Some(warning) = &answer.task_update_warning {
                             eprintln!("{} {warning}", style("Предупреждение задачи:").yellow());
@@ -894,6 +1014,15 @@ pub(crate) async fn run() -> Result<()> {
             }
         }
     }
+    drop(help_tool_runtime);
+    if let Some(runtime) = help_mcp_runtime {
+        if let Err(error) = runtime.shutdown().await {
+            eprintln!(
+                "{} {error:#}",
+                style("Не удалось корректно остановить project help MCP:").yellow()
+            );
+        }
+    }
     println!("{}", style("До встречи! 🦊").magenta());
     Ok(())
 }
@@ -922,6 +1051,33 @@ pub(crate) fn handle_rag_command(command: &str, enabled: &mut bool) -> Result<St
 
 pub(crate) fn should_retrieve_rag(enabled: bool, user_question: bool) -> bool {
     enabled && user_question
+}
+
+fn should_retrieve_for_request(project_help: bool, rag_enabled: bool, user_question: bool) -> bool {
+    project_help || should_retrieve_rag(rag_enabled, user_question)
+}
+
+fn retrieval_context_for_request(
+    project_help: bool,
+    history: &[Message],
+    memory: &ActiveMemory,
+) -> RetrievalContext {
+    if project_help {
+        RetrievalContext::default()
+    } else {
+        RetrievalContext::from_state(history, memory)
+    }
+}
+
+fn retrieval_config_for_request(project_help: bool) -> RetrievalConfig {
+    RetrievalConfig {
+        source_scope: if project_help {
+            RetrievalSourceScope::ProjectDocumentation
+        } else {
+            RetrievalSourceScope::All
+        },
+        ..RetrievalConfig::default()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

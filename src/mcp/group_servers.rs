@@ -19,9 +19,10 @@ use tokio::net::TcpListener;
 use super::{
     calculate_github_metrics, render_github_report, save_report_in_directory, CalDavClient,
     CalculateGithubMetricsRequest, CalendarDigestEvent, CalendarEventRequest, CalendarEventResult,
-    GithubActivityRequest, GithubClient, GithubMetrics, GithubProjectActivity,
-    GithubRepositoryMetadata, GithubRepositoryRequest, McpServerKind, RenderGithubReportRequest,
-    SaveReportRequest, SaveReportResult, TelegramClient, TelegramOutcome, ToolOutcome,
+    CodeGraphExploreRequest, GithubActivityRequest, GithubClient, GithubMetrics,
+    GithubProjectActivity, GithubRepositoryMetadata, GithubRepositoryRequest, McpServerKind,
+    RenderGithubReportRequest, SaveReportRequest, SaveReportResult, TelegramClient,
+    TelegramOutcome, ToolOutcome, WorkspaceInspector,
 };
 use crate::{send_request, AgentSettings, Config, Message, Provider, RequestOptions};
 
@@ -204,12 +205,14 @@ impl_logged_server_handler!(ReportingServer, "reporting");
 struct WorkspaceServer {
     tool_router: ToolRouter<Self>,
     root: PathBuf,
+    inspector: WorkspaceInspector,
 }
 
 impl WorkspaceServer {
     fn new(root: PathBuf) -> Self {
         Self {
             tool_router: Self::tool_router(),
+            inspector: WorkspaceInspector::new(root.clone()),
             root,
         }
     }
@@ -217,6 +220,43 @@ impl WorkspaceServer {
 
 #[tool_router(router = tool_router)]
 impl WorkspaceServer {
+    #[tool(
+        name = "git_current_branch",
+        description = "Возвращает текущую Git-ветку workspace без изменения репозитория",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn git_current_branch(&self) -> Result<Json<super::GitBranchResult>, rmcp::ErrorData> {
+        self.inspector
+            .git_current_branch()
+            .await
+            .map(Json)
+            .map_err(tool_error)
+    }
+
+    #[tool(
+        name = "codegraph_explore",
+        description = "Исследует структуру и связи кода в текущем workspace через локальный CodeGraph",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn codegraph_explore(
+        &self,
+        Parameters(request): Parameters<CodeGraphExploreRequest>,
+    ) -> Result<Json<super::CodeGraphExploreResult>, rmcp::ErrorData> {
+        self.inspector
+            .codegraph_explore(&request.question)
+            .await
+            .map(Json)
+            .map_err(tool_error)
+    }
+
     #[tool(
         name = "save_report",
         description = "Сохраняет UTF-8 отчёт в безопасное имя файла рабочего каталога",
@@ -237,6 +277,63 @@ impl WorkspaceServer {
 }
 
 impl_logged_server_handler!(WorkspaceServer, "workspace");
+
+#[derive(Clone)]
+struct HelpWorkspaceServer {
+    tool_router: ToolRouter<Self>,
+    inspector: WorkspaceInspector,
+}
+
+impl HelpWorkspaceServer {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+            inspector: WorkspaceInspector::new(root),
+        }
+    }
+}
+
+#[tool_router(router = tool_router)]
+impl HelpWorkspaceServer {
+    #[tool(
+        name = "git_current_branch",
+        description = "Возвращает текущую Git-ветку workspace без изменения репозитория",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn git_current_branch(&self) -> Result<Json<super::GitBranchResult>, rmcp::ErrorData> {
+        self.inspector
+            .git_current_branch()
+            .await
+            .map(Json)
+            .map_err(tool_error)
+    }
+
+    #[tool(
+        name = "codegraph_explore",
+        description = "Исследует структуру и связи кода в текущем workspace через локальный CodeGraph",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn codegraph_explore(
+        &self,
+        Parameters(request): Parameters<CodeGraphExploreRequest>,
+    ) -> Result<Json<super::CodeGraphExploreResult>, rmcp::ErrorData> {
+        self.inspector
+            .codegraph_explore(&request.question)
+            .await
+            .map(Json)
+            .map_err(tool_error)
+    }
+}
+
+impl_logged_server_handler!(HelpWorkspaceServer, "project-help");
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -600,10 +697,78 @@ pub(crate) async fn bind_and_serve_group(
     serve_group(kind, listener, config, workspace).await
 }
 
+pub(crate) async fn serve_help_workspace(
+    listener: TcpListener,
+    workspace: PathBuf,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> Result<()> {
+    let factory = HelpWorkspaceServer::new(workspace);
+    let service = StreamableHttpService::new(
+        move || Ok(factory.clone()),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default(),
+    );
+    let router = axum::Router::new().nest_service("/mcp", service);
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown.await;
+        })
+        .await
+        .context("help-only MCP-сервер завершился с ошибкой")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Timelike;
+
+    #[test]
+    fn workspace_router_exposes_project_inspection_as_read_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let server = WorkspaceServer::new(directory.path().to_path_buf());
+        assert_eq!(
+            server
+                .tool_router
+                .map
+                .keys()
+                .map(|name| name.as_ref())
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["codegraph_explore", "git_current_branch", "save_report"]
+                .into_iter()
+                .collect()
+        );
+        for name in ["git_current_branch", "codegraph_explore"] {
+            let annotations = server.tool_router.map[name]
+                .attr
+                .annotations
+                .as_ref()
+                .expect("project inspection annotations");
+            assert_eq!(annotations.read_only_hint, Some(true));
+            assert_eq!(annotations.destructive_hint, Some(false));
+        }
+    }
+
+    #[test]
+    fn help_workspace_router_exposes_only_project_inspection() {
+        let directory = tempfile::tempdir().unwrap();
+        let server = HelpWorkspaceServer::new(directory.path().to_path_buf());
+        assert_eq!(
+            server
+                .tool_router
+                .map
+                .keys()
+                .map(|name| name.as_ref())
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["codegraph_explore", "git_current_branch"]
+                .into_iter()
+                .collect()
+        );
+        for tool in server.tool_router.map.values() {
+            let annotations = tool.attr.annotations.as_ref().unwrap();
+            assert_eq!(annotations.read_only_hint, Some(true));
+            assert_eq!(annotations.destructive_hint, Some(false));
+        }
+    }
 
     #[test]
     fn tomorrow_interval_uses_moscow_calendar_boundaries() {
