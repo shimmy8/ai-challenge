@@ -154,6 +154,69 @@ pub(crate) fn print_banner() {
     println!("{}\n", style("FOX LLM — спроси у лисы").magenta().bold());
 }
 
+pub(crate) fn format_agent_output(text: &str) -> String {
+    let width = usize::from(Term::stdout().size().1).saturating_sub(1);
+    if width == 0 {
+        text.to_owned()
+    } else {
+        wrap_agent_output(text, width)
+    }
+}
+
+fn wrap_agent_output(text: &str, width: usize) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut in_code_fence = false;
+
+    for (line_index, line) in text.split('\n').enumerate() {
+        if line_index > 0 {
+            output.push('\n');
+        }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            output.push_str(line);
+            in_code_fence = !in_code_fence;
+            continue;
+        }
+        if in_code_fence || line.trim().is_empty() {
+            output.push_str(line);
+            continue;
+        }
+        wrap_agent_line(&mut output, line, width);
+    }
+
+    output
+}
+
+fn wrap_agent_line(output: &mut String, line: &str, width: usize) {
+    let indent = line
+        .chars()
+        .take_while(|character| character.is_whitespace())
+        .collect::<String>();
+    let mut current = indent.clone();
+    let mut has_word = false;
+
+    for word in line.split_whitespace() {
+        let separator_width = usize::from(has_word);
+        let next_width = console::measure_text_width(&current)
+            + separator_width
+            + console::measure_text_width(word);
+        if has_word && next_width > width {
+            output.push_str(current.trim_end());
+            output.push('\n');
+            current.clear();
+            current.push_str(&indent);
+            current.push_str(word);
+        } else {
+            if has_word {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
+        has_word = true;
+    }
+    output.push_str(current.trim_end());
+}
+
 pub(crate) struct StatusBar<'a> {
     pub(crate) provider: Provider,
     pub(crate) model: &'a str,
@@ -307,12 +370,19 @@ pub(crate) fn format_memory(memory: &ActiveMemory, message_count: usize) -> Stri
     )
 }
 
-pub(crate) fn print_help(branching_enabled: bool) {
-    println!();
+pub(crate) fn write_help(output: &mut impl Write, branching_enabled: bool) -> Result<()> {
+    writeln!(output)?;
     for (command, description) in available_commands(branching_enabled) {
-        println!("  {:<14} {}", style(command).yellow(), description);
+        writeln!(output, "  {:<14} {}", style(command).yellow(), description)?;
     }
-    println!();
+    writeln!(output)?;
+    writeln!(output, "Задайте вопрос о проекте: /help <вопрос>")?;
+    writeln!(output)?;
+    Ok(())
+}
+
+pub(crate) fn print_help(branching_enabled: bool) -> Result<()> {
+    write_help(&mut std::io::stdout().lock(), branching_enabled)
 }
 
 pub(crate) fn parse_context_messages(value: &str) -> Result<usize> {
@@ -996,4 +1066,46 @@ pub(crate) fn remember_provider(
 ) -> Result<()> {
     config.last_provider = Some(provider);
     config.save(path)
+}
+
+#[cfg(test)]
+mod developer_help_tests {
+    use super::*;
+
+    #[test]
+    fn help_output_advertises_project_questions_on_a_separate_line() {
+        let mut output = Vec::new();
+        write_help(&mut output, false).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("/help          показать подсказку"));
+        assert!(output.contains("\nЗадайте вопрос о проекте: /help <вопрос>\n"));
+    }
+
+    #[test]
+    fn agent_output_wraps_only_between_words() {
+        let text = "Ассистент объясняет устройство основных модулей проекта";
+        let wrapped = wrap_agent_output(text, 20);
+
+        assert_eq!(
+            wrapped,
+            "Ассистент объясняет\nустройство основных\nмодулей проекта"
+        );
+        assert_eq!(
+            wrapped.split_whitespace().collect::<Vec<_>>(),
+            text.split_whitespace().collect::<Vec<_>>()
+        );
+        assert!(wrapped
+            .lines()
+            .all(|line| console::measure_text_width(line) <= 20));
+    }
+
+    #[test]
+    fn agent_output_preserves_paragraphs_and_fenced_code() {
+        let text =
+            "Короткий абзац для переноса.\n\n```rust\nlet deliberately_long_identifier = 1;\n```";
+        let wrapped = wrap_agent_output(text, 12);
+
+        assert!(wrapped.contains("Короткий\nабзац для\nпереноса."));
+        assert!(wrapped.contains("\n\n```rust\nlet deliberately_long_identifier = 1;\n```"));
+    }
 }

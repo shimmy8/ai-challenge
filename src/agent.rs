@@ -385,6 +385,8 @@ pub(crate) struct Agent {
     pub(crate) tool_executor: Option<SharedToolExecutor>,
     pub(crate) tool_approval: SharedToolApproval,
     tool_timeout: Duration,
+    advertise_pipeline_tool: bool,
+    executed_tool_results: Vec<(ToolCall, ToolResult)>,
 }
 
 impl Agent {
@@ -410,6 +412,8 @@ impl Agent {
             tool_executor: None,
             tool_approval: Arc::new(AutoApprove),
             tool_timeout: DEFAULT_MCP_TOOL_TIMEOUT,
+            advertise_pipeline_tool: true,
+            executed_tool_results: Vec::new(),
         }
     }
 
@@ -445,7 +449,27 @@ impl Agent {
     ) -> Result<ApiAnswer> {
         let before = self.request_state();
         self.status = AgentStatus::Running;
-        let result = self.ask_rag_inner(input, request_content, chunks).await;
+        let result = self
+            .ask_rag_inner(input, request_content, chunks, true)
+            .await;
+        if let Err(error) = &result {
+            self.restore_request_state(before);
+            self.status = AgentStatus::Failed(error.to_string());
+        }
+        result
+    }
+
+    pub(crate) async fn ask_rag_clean(
+        &mut self,
+        input: &str,
+        request_content: &str,
+        chunks: &[RetrievedChunk],
+    ) -> Result<ApiAnswer> {
+        let before = self.request_state();
+        self.status = AgentStatus::Running;
+        let result = self
+            .ask_rag_inner(input, request_content, chunks, false)
+            .await;
         if let Err(error) = &result {
             self.restore_request_state(before);
             self.status = AgentStatus::Failed(error.to_string());
@@ -458,6 +482,7 @@ impl Agent {
         input: &str,
         request_content: &str,
         chunks: &[RetrievedChunk],
+        render_sources: bool,
     ) -> Result<ApiAnswer> {
         self.prepare_context(input).await?;
         if self.settings.compression_strategy == CompressionStrategy::Branching
@@ -576,7 +601,11 @@ impl Agent {
         if let Some(task) = &self.memory.task {
             process_task_answer(&mut answer, task.phase);
         }
-        answer.text = render_grounded_answer(&answer.text, &grounded.citations);
+        answer.text = if render_sources {
+            render_grounded_answer(&answer.text, &grounded.citations)
+        } else {
+            render_project_help_answer(&answer.text)?
+        };
         answer.rag_citations = grounded.citations;
         if answer.generation_requests < 2 {
             answer.generation_requests = 1;
@@ -658,6 +687,7 @@ impl Agent {
     }
 
     async fn ask_inner(&mut self, input: &str, request_content: Option<&str>) -> Result<ApiAnswer> {
+        self.executed_tool_results.clear();
         self.prepare_context(input).await?;
         if self.settings.compression_strategy == CompressionStrategy::Branching
             && self.branch_pending
@@ -686,7 +716,7 @@ impl Agent {
             .map(|executor| executor.definitions())
             .unwrap_or_default();
         let mut advertised_tools = tool_definitions.clone();
-        if !advertised_tools.is_empty() {
+        if !advertised_tools.is_empty() && self.advertise_pipeline_tool {
             advertised_tools.push(pipeline_tool_definition());
         }
         let mut request_options = RequestOptions {
@@ -780,6 +810,13 @@ impl Agent {
                 }
                 results.push(result);
             }
+            self.executed_tool_results.extend(
+                answer
+                    .tool_calls
+                    .iter()
+                    .cloned()
+                    .zip(results.iter().cloned()),
+            );
             request_options.tool_calls = answer.tool_calls.clone();
             request_options.tool_results = results;
             answer = self
@@ -1623,6 +1660,14 @@ impl Agent {
     ) {
         self.tool_executor = executor;
         self.tool_approval = approval;
+    }
+
+    pub(crate) fn set_pipeline_tool_enabled(&mut self, enabled: bool) {
+        self.advertise_pipeline_tool = enabled;
+    }
+
+    pub(crate) fn take_executed_tool_results(&mut self) -> Vec<(ToolCall, ToolResult)> {
+        std::mem::take(&mut self.executed_tool_results)
     }
 }
 
