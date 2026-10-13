@@ -51,6 +51,9 @@ test('updates one bot sticky comment without creating duplicates', async () => {
   assert.ok(mock.calls.some(([kind, value]) => kind === 'summary' && value.includes('lexical_fallback')));
   assert.ok(mock.calls.some(([kind, value]) => kind === 'summary' && value.includes('rate_limited')));
   assert.ok(mock.calls.some(([kind, value]) => kind === 'summary' && value.includes('12')));
+  assert.ok(mock.calls.some(([kind, value]) =>
+    kind === 'summary' && value.includes('Тесты:') && value.includes('Режим поиска:')));
+  assert.ok(!mock.calls.some(([kind, value]) => kind === 'summary' && value.includes('Tests:')));
 });
 
 test('rejects unknown retrieval mode and invalid counters before publishing', async () => {

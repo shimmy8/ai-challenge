@@ -38,16 +38,16 @@ async function publishReview({ github, context, core, body, reviewResult }) {
   }
   const status = reviewResult.test_report?.status || 'unknown';
   await core.summary
-    .addHeading('AI review')
+    .addHeading('AI-ревью')
     .addRaw(
-      'Tests: ' + status +
-      '<br>Retrieval: ' + reviewResult.retrieval_mode +
+      'Тесты: ' + status +
+      '<br>Режим поиска: ' + reviewResult.retrieval_mode +
       (reviewResult.retrieval_fallback_reason
-        ? '<br>Fallback reason: ' + reviewResult.retrieval_fallback_reason
+        ? '<br>Причина резервного режима: ' + reviewResult.retrieval_fallback_reason
         : '') +
-      '<br>Cached embeddings: ' + reviewResult.cached_embeddings +
-      '<br>New embeddings: ' + reviewResult.new_embeddings +
-      '<br>Sticky comment updated.'
+      '<br>Эмбеддингов из кэша: ' + reviewResult.cached_embeddings +
+      '<br>Новых эмбеддингов: ' + reviewResult.new_embeddings +
+      '<br>Закреплённый комментарий обновлён.'
     )
     .write();
   return existing ? 'updated' : 'created';
