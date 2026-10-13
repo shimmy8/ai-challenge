@@ -1,0 +1,82 @@
+# День 32. Автоматизация ревью кода
+
+## Результат
+
+Добавлен автоматический pipeline первичного AI-ревью pull request. Он получает
+metadata и paginated patches из GitHub API, ограничивает diff, извлекает
+релевантный контекст из документации и Rust-кода базовой ветки и публикует
+структурированный Markdown-комментарий.
+
+## Архитектура и границы доверия
+
+```text
+pull_request_target
+├── tests: head.sha, cargo test, contents:read, без secrets
+│   └── очищенный ограниченный test-report.json
+└── review: base.sha, OPENAI_API_KEY, pull-requests:write
+    ├── GitHub API → metadata + changed files + patches
+    ├── selection/batching → прозрачный partial coverage
+    ├── временный SQLite RAG → документация + код base-ветки
+    ├── LLM JSON → path/line/evidence validation
+    └── один sticky-комментарий
+```
+
+PR title/body, diff, test log и RAG chunks считаются недоверенными данными.
+Review job не checkout'ит head SHA и не выполняет код, build scripts или
+конфигурацию PR. Fork PR пропускаются до provider calls.
+
+## Пример при успешных тестах
+
+```markdown
+<!-- fox-llm-ai-review -->
+# AI-ревью PR #42
+
+**Тесты:** `passed`
+
+## Потенциальные баги
+Не обнаружено.
+
+## Архитектурные проблемы
+Не обнаружено.
+
+## Рекомендации
+- **suggestion: Упростить обработку ошибки** (`src/example.rs:18`) — ...
+```
+
+## Пример при упавших тестах
+
+```markdown
+**Тесты:** `failed`
+
+## Почему упали тесты
+
+**Уверенность:** `likely` — тест `parser::rejects_empty` падает рядом с
+изменённой проверкой входных данных; прямого подтверждения причины недостаточно.
+```
+
+`infrastructure_error` выводится отдельно и не представляется как дефект кода.
+
+## Ограничения
+
+- 50 файлов;
+- 300000 Unicode-символов diff суммарно;
+- 40000 символов на файл;
+- 60000 символов на batch;
+- 6000 символов RAG-контекста;
+- 30 итоговых замечаний;
+- 100000 символов очищенного test log.
+
+## Проверка
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+openspec validate add-automated-pr-code-review --strict
+```
+
+Контролируемые smoke tests в GitHub должны отдельно проверить PR с успешными и
+упавшими тестами: review запускается в обоих случаях, failed test job остаётся
+красным, обновляется один sticky-комментарий, partial coverage видим, а secrets
+не появляются в логах. До фактического запуска этих PR проверка не считается
+выполненной.

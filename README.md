@@ -672,3 +672,57 @@ Rust». При сбое проверки черновик не показыва�
 свободном формате, продолжают загружаться без преобразования. Активный профиль
 передаётся в `instructions` OpenAI/Ollama или `system` Claude при каждом запросе
 и не зависит от выбранной стратегии сжатия контекста.
+# Автоматическое AI-ревью pull request
+
+Workflow `.github/workflows/ai-review.yml` запускается на `opened`, `reopened` и
+`synchronize` для pull request из веток этого же репозитория. PR из fork
+пропускаются без запросов к LLM и без передачи credentials.
+
+Pipeline состоит из двух изолированных jobs:
+
+1. `tests` checkout'ит точный `head.sha`, получает только `contents: read`, не
+   получает secrets и запускает `cargo test`. Очищенный лог ограничивается
+   100000 Unicode-символами и вместе со статусом `passed`, `failed` или
+   `infrastructure_error` передаётся как `test-report.json`. Упавшие тесты
+   сохраняют красный статус job.
+2. `review` всегда запускается после `tests`, checkout'ит точный `base.sha` и
+   только затем получает `OPENAI_API_KEY` и `pull-requests: write`. Код PR в
+   этом job не исполняется: metadata и patches читаются через GitHub API как
+   недоверенные данные. Результат создаёт или обновляет один комментарий с
+   маркером `<!-- fox-llm-ai-review -->`.
+
+> `pull_request_target` имеет доступ к secrets базового репозитория. Нельзя
+> менять review job так, чтобы он checkout'ил или исполнял head-код PR.
+
+В настройках репозитория добавьте secret `OPENAI_API_KEY` и variables
+`FOX_REVIEW_MODEL`, `FOX_REVIEW_EMBEDDING_MODEL`. Необязательная
+`FOX_REVIEW_PROVIDER` имеет default `openai`. Лимиты можно переопределить через
+`FOX_REVIEW_MAX_FILES`, `FOX_REVIEW_MAX_DIFF_CHARS`,
+`FOX_REVIEW_MAX_FILE_CHARS`, `FOX_REVIEW_BATCH_CHARS` и
+`FOX_REVIEW_MAX_FINDINGS`.
+
+Defaults: 50 файлов, 300000 символов diff суммарно, 40000 на файл, 60000 на
+batch, 30 замечаний и 6000 символов RAG-контекста. Превышение лимита создаёт
+частичное ревью с явным coverage, а не аварийное завершение.
+
+Локальный запуск использует только CLI и environment, не читая
+`.fox-llm.json`, `.fox-embeddings.json` или env-файлы:
+
+```bash
+export GITHUB_TOKEN=...
+export OPENAI_API_KEY=...
+export FOX_REVIEW_MODEL=your-chat-model
+export FOX_REVIEW_EMBEDDING_MODEL=your-embedding-model
+
+cargo run -- review-pr \
+  --repository owner/name \
+  --pull-request 42 \
+  --test-report test-report.json \
+  --output review.md \
+  --json-output review.json
+```
+
+Без `--test-report` локальный результат получает статус `not_run`. Markdown
+всегда содержит потенциальные баги, архитектурные проблемы, рекомендации и
+coverage. При `failed` дополнительно выводится `Почему упали тесты` с
+уверенностью `confirmed`, `likely` или `unknown`.

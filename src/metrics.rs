@@ -22,6 +22,7 @@ pub(crate) fn parse_dump_metrics_flag(args: impl IntoIterator<Item = String>) ->
         | StartupMode::Index(_)
         | StartupMode::RagEval(_)
         | StartupMode::RagChatEval(_)
+        | StartupMode::ReviewPr(_)
         | StartupMode::SummarizeEval(_) => {
             bail!("этот startup-режим нельзя использовать как флаг метрик")
         }
@@ -40,6 +41,7 @@ pub(crate) enum StartupMode {
     Index(crate::rag::IndexOptions),
     RagEval(crate::rag::RagEvalOptions),
     RagChatEval(crate::rag::RagChatEvalOptions),
+    ReviewPr(crate::review::ReviewOptions),
     SummarizeEval(crate::summarization::SummarizeEvalOptions),
 }
 
@@ -74,6 +76,11 @@ pub(crate) fn parse_startup_mode(args: impl IntoIterator<Item = String>) -> Resu
         return Ok(StartupMode::SummarizeEval(
             crate::summarization::parse_summarize_eval_options(&args[1..])?,
         ));
+    }
+    if args.first().is_some_and(|value| value == "review-pr") {
+        return Ok(StartupMode::ReviewPr(crate::review::parse_review_options(
+            &args[1..],
+        )?));
     }
     let mut dump_metrics = false;
     for argument in args {
