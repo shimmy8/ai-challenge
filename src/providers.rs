@@ -19,6 +19,14 @@ use std::{
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
+
+mod models;
+
+pub(crate) use models::{
+    build_models_request, empty_models_error, fetch_models, model_discovery_connection_error,
+    parse_model_ids,
+};
+
 pub(crate) async fn send_request(
     client: &Client,
     settings: &AgentSettings,
