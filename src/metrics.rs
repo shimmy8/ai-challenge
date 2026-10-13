@@ -41,7 +41,7 @@ pub(crate) enum StartupMode {
     Index(crate::rag::IndexOptions),
     RagEval(crate::rag::RagEvalOptions),
     RagChatEval(crate::rag::RagChatEvalOptions),
-    ReviewPr(crate::review::ReviewOptions),
+    ReviewPr(fox_review::ReviewOptions),
     SummarizeEval(crate::summarization::SummarizeEvalOptions),
 }
 
@@ -78,7 +78,7 @@ pub(crate) fn parse_startup_mode(args: impl IntoIterator<Item = String>) -> Resu
         ));
     }
     if args.first().is_some_and(|value| value == "review-pr") {
-        return Ok(StartupMode::ReviewPr(crate::review::parse_review_options(
+        return Ok(StartupMode::ReviewPr(fox_review::parse_review_options(
             &args[1..],
         )?));
     }

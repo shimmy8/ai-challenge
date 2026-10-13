@@ -5,12 +5,17 @@ edition = "2021"
 description = "A friendly interactive CLI for OpenAI, Claude, and local Ollama models"
 license = "MIT"
 
+[workspace]
+members = ["crates/fox-review"]
+resolver = "2"
+
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 console = "0.15"
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
+fox-review = { path = "crates/fox-review" }
 jsonschema = { version = "0.57", default-features = false }
 pulldown-cmark = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

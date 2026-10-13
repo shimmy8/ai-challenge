@@ -186,7 +186,7 @@ pub(crate) fn retrieval_query(files: &[SelectedFile], diagnostics: &[String]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::review::FileStatus;
+    use crate::FileStatus;
 
     fn settings() -> ReviewSettings {
         ReviewSettings {
@@ -195,6 +195,7 @@ mod tests {
             provider: "openai".into(),
             model: "model".into(),
             embedding_model: "embed".into(),
+            embedding_cache: None,
             max_files: 2,
             max_diff_chars: 20,
             max_file_chars: 12,

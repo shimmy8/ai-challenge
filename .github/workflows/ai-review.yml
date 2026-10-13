@@ -80,6 +80,33 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      - name: Compute review cache namespace
+        id: cache_namespace
+        shell: bash
+        env:
+          EMBEDDING_MODEL: ${{ vars.FOX_REVIEW_EMBEDDING_MODEL }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          namespace=$(printf '%s' "v1|https://api.openai.com|${EMBEDDING_MODEL}|unicode-2000-v1" | sha256sum | cut -d' ' -f1)
+          echo "prefix=${{ runner.os }}-review-rag-${BASE_BRANCH}-${namespace}" >> "$GITHUB_OUTPUT"
+      - name: Restore trusted review cache
+        id: review_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ai-review-cache/review-rag.db
+          key: ${{ steps.cache_namespace.outputs.prefix }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ steps.cache_namespace.outputs.prefix }}-
+      - name: Record restored cache checksum
+        id: cache_before
+        shell: bash
+        run: |
+          if [[ -f .ai-review-cache/review-rag.db ]]; then
+            echo "sha=$(sha256sum .ai-review-cache/review-rag.db | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=missing" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with:
@@ -108,7 +135,7 @@ jobs:
             jq -n '{status:"infrastructure_error",exit_code:null,failed_tests:[],log_excerpt:"",truncated:false,infrastructure_message:"test-report artifact отсутствует или повреждён"}' > "$report"
           fi
       - name: Build trusted reviewer
-        run: cargo build --release
+        run: cargo build --release --package fox-review --bin fox-review
       - name: Generate AI review
         id: review
         env:
@@ -117,36 +144,52 @@ jobs:
           FOX_REVIEW_PROVIDER: ${{ vars.FOX_REVIEW_PROVIDER || 'openai' }}
           FOX_REVIEW_MODEL: ${{ vars.FOX_REVIEW_MODEL }}
           FOX_REVIEW_EMBEDDING_MODEL: ${{ vars.FOX_REVIEW_EMBEDDING_MODEL }}
+          FOX_REVIEW_EMBEDDING_CACHE: .ai-review-cache/review-rag.db
           FOX_REVIEW_MAX_FILES: ${{ vars.FOX_REVIEW_MAX_FILES || '50' }}
           FOX_REVIEW_MAX_DIFF_CHARS: ${{ vars.FOX_REVIEW_MAX_DIFF_CHARS || '300000' }}
           FOX_REVIEW_MAX_FILE_CHARS: ${{ vars.FOX_REVIEW_MAX_FILE_CHARS || '40000' }}
           FOX_REVIEW_BATCH_CHARS: ${{ vars.FOX_REVIEW_BATCH_CHARS || '60000' }}
           FOX_REVIEW_MAX_FINDINGS: ${{ vars.FOX_REVIEW_MAX_FINDINGS || '30' }}
         run: |
-          target/release/fox-llm review-pr \
+          target/release/fox-review \
             --repository '${{ github.repository }}' \
             --pull-request '${{ github.event.pull_request.number }}' \
             --test-report .ai-review-artifact/test-report.json \
             --output review.md \
             --json-output review.json
       - name: Create or update sticky review comment
+        id: publish
         if: always() && steps.review.outcome == 'success'
         uses: actions/github-script@v7
         env:
           REVIEW_PATH: review.md
+          REVIEW_JSON_PATH: review.json
         with:
           script: |
             const fs = require('fs');
             const body = fs.readFileSync(process.env.REVIEW_PATH, 'utf8');
+            const reviewResult = JSON.parse(fs.readFileSync(process.env.REVIEW_JSON_PATH, 'utf8'));
             const { publishReview } = require(process.env.GITHUB_WORKSPACE + '/.github/scripts/publish-review.js');
-            await publishReview({ github, context, core, body });
+            await publishReview({ github, context, core, body, reviewResult });
+      - name: Detect updated review cache
+        id: cache_after
+        if: always() && steps.review.outcome == 'success'
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ steps.cache_before.outputs.sha }}
+        run: |
+          if [[ -f .ai-review-cache/review-rag.db ]]; then
+            after=$(sha256sum .ai-review-cache/review-rag.db | cut -d' ' -f1)
+          else
+            after=missing
+          fi
+          if [[ "$after" != "$BEFORE_SHA" ]]; then echo "changed=true" >> "$GITHUB_OUTPUT"; else echo "changed=false" >> "$GITHUB_OUTPUT"; fi
+      - name: Save trusted review cache
+        if: steps.review.outcome == 'success' && steps.publish.outcome == 'success' && steps.cache_after.outputs.changed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .ai-review-cache/review-rag.db
+          key: ${{ steps.cache_namespace.outputs.prefix }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Report reviewer failure
         if: always() && steps.review.outcome != 'success'
         run: echo 'AI reviewer failed; an existing sticky comment was left unchanged.' >> "$GITHUB_STEP_SUMMARY"
-
-  fork-notice:
-    if: github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: ubuntu-latest
-    permissions: {}
-    steps:
-      - run: echo 'AI review skipped for a fork pull request; no credentials were provided.' >> "$GITHUB_STEP_SUMMARY"

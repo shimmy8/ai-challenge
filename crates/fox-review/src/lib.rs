@@ -1,13 +1,17 @@
 mod analysis;
+mod cache;
 mod diff;
 mod github;
+mod provider;
 mod rag;
 mod settings;
 mod test_report;
 
 pub(crate) use analysis::*;
+pub(crate) use cache::*;
 pub(crate) use diff::*;
 pub(crate) use github::*;
+pub(crate) use provider::*;
 pub(crate) use rag::*;
 pub(crate) use settings::*;
 pub(crate) use test_report::*;
@@ -16,7 +20,7 @@ use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReviewOptions {
+pub struct ReviewOptions {
     pub(crate) repository: String,
     pub(crate) pull_request: u64,
     pub(crate) test_report: Option<PathBuf>,
@@ -25,6 +29,7 @@ pub(crate) struct ReviewOptions {
     pub(crate) provider: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) embedding_model: Option<String>,
+    pub(crate) embedding_cache: Option<PathBuf>,
     pub(crate) max_files: Option<usize>,
     pub(crate) max_diff_chars: Option<usize>,
     pub(crate) max_file_chars: Option<usize>,
@@ -32,7 +37,7 @@ pub(crate) struct ReviewOptions {
     pub(crate) max_findings: Option<usize>,
 }
 
-pub(crate) fn parse_review_options(args: &[String]) -> Result<ReviewOptions> {
+pub fn parse_review_options(args: &[String]) -> Result<ReviewOptions> {
     let mut repository = None;
     let mut pull_request = None;
     let mut test_report = None;
@@ -41,6 +46,7 @@ pub(crate) fn parse_review_options(args: &[String]) -> Result<ReviewOptions> {
     let mut provider = None;
     let mut model = None;
     let mut embedding_model = None;
+    let mut embedding_cache = None;
     let mut max_files = None;
     let mut max_diff_chars = None;
     let mut max_file_chars = None;
@@ -61,6 +67,7 @@ pub(crate) fn parse_review_options(args: &[String]) -> Result<ReviewOptions> {
             "--provider" => &mut provider,
             "--model" => &mut model,
             "--embedding-model" => &mut embedding_model,
+            "--embedding-cache" => &mut embedding_cache,
             "--max-files" | "--max-diff-chars" | "--max-file-chars" | "--batch-chars"
             | "--max-findings" => {
                 let parsed = value
@@ -113,6 +120,7 @@ pub(crate) fn parse_review_options(args: &[String]) -> Result<ReviewOptions> {
         provider,
         model,
         embedding_model,
+        embedding_cache: embedding_cache.map(PathBuf::from),
         max_files,
         max_diff_chars,
         max_file_chars,
@@ -132,7 +140,7 @@ fn validate_repository_name(value: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn run(options: ReviewOptions) -> Result<()> {
+pub async fn run(options: ReviewOptions) -> Result<()> {
     run_review(options).await
 }
 
@@ -157,6 +165,8 @@ mod tests {
             "review.md",
             "--json-output",
             "review.json",
+            "--embedding-cache",
+            ".ai-review-cache/review-rag.db",
         ]))
         .unwrap();
 
@@ -166,6 +176,10 @@ mod tests {
         assert_eq!(options.output, PathBuf::from("review.md"));
         assert_eq!(options.json_output, PathBuf::from("review.json"));
         assert_eq!(options.provider, None);
+        assert_eq!(
+            options.embedding_cache,
+            Some(PathBuf::from(".ai-review-cache/review-rag.db"))
+        );
     }
 
     #[test]

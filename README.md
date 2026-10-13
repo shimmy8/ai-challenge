@@ -688,8 +688,12 @@ Pipeline состоит из двух изолированных jobs:
 2. `review` всегда запускается после `tests`, checkout'ит точный `base.sha` и
    только затем получает `OPENAI_API_KEY` и `pull-requests: write`. Код PR в
    этом job не исполняется: metadata и patches читаются через GitHub API как
-   недоверенные данные. Результат создаёт или обновляет один комментарий с
-   маркером `<!-- fox-llm-ai-review -->`.
+   недоверенные данные. Job собирает только минимальный target
+   `fox-review`, а не весь CLI. Результат создаёт или обновляет один комментарий
+   с маркером `<!-- fox-llm-ai-review -->`.
+
+Fork PR не запускает ни `tests`, ни `review`; отдельной notification job для
+него нет. Skipped-состояние jobs остаётся видно в интерфейсе Actions.
 
 > `pull_request_target` имеет доступ к secrets базового репозитория. Нельзя
 > менять review job так, чтобы он checkout'ил или исполнял head-код PR.
@@ -700,6 +704,22 @@ Pipeline состоит из двух изолированных jobs:
 `FOX_REVIEW_MAX_FILES`, `FOX_REVIEW_MAX_DIFF_CHARS`,
 `FOX_REVIEW_MAX_FILE_CHARS`, `FOX_REVIEW_BATCH_CHARS` и
 `FOX_REVIEW_MAX_FINDINGS`.
+
+Embedding vectors переиспользуются между доверенными review-запусками через
+`.ai-review-cache/review-rag.db`. Cache содержит только content hashes,
+namespace (schema, endpoint, model, runtime dimensions и chunking version) и
+vectors — без исходного текста и credentials. Первый live query подтверждает
+размерность модели; несовместимый или повреждённый cache считается miss. Перед
+сохранением удаляются hashes, которых больше нет в текущем corpus базовой
+ветки. В GitHub Actions cache восстанавливается и сохраняется только в
+привилегированном `review` job.
+
+Для `429`, `5xx`, timeout и временных transport errors выполняется не более
+трёх embedding-попыток с ограниченным backoff. Если они исчерпаны, весь запуск
+переходит в `lexical_fallback` и больше не вызывает embedding API. Ошибки
+аутентификации/конфигурации и невалидный успешный ответ остаются фатальными.
+Режим `embedding` или `lexical_fallback`, а также cache counters записываются в
+`review.json`, Markdown и Actions Summary.
 
 Defaults: 50 файлов, 300000 символов diff суммарно, 40000 на файл, 60000 на
 batch, 30 замечаний и 6000 символов RAG-контекста. Превышение лимита создаёт
@@ -720,6 +740,18 @@ cargo run -- review-pr \
   --test-report test-report.json \
   --output review.md \
   --json-output review.json
+```
+
+Для локального переиспользования vectors добавьте
+`--embedding-cache .ai-review-cache/review-rag.db` либо задайте
+`FOX_REVIEW_EMBEDDING_CACHE`. Выделенный binary можно собрать и запустить без
+остального приложения:
+
+```bash
+cargo build --release --package fox-review --bin fox-review
+target/release/fox-review --repository owner/name --pull-request 42 \
+  --output review.md --json-output review.json \
+  --embedding-cache .ai-review-cache/review-rag.db
 ```
 
 Без `--test-report` локальный результат получает статус `not_run`. Markdown

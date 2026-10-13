@@ -170,7 +170,7 @@ pub(crate) async fn run() -> Result<()> {
         return run_summarization_evaluation(options).await;
     }
     if let StartupMode::ReviewPr(options) = startup_mode {
-        return crate::review::run(options).await;
+        return fox_review::run(options).await;
     }
     let StartupMode::Interactive { dump_metrics } = startup_mode else {
         unreachable!();

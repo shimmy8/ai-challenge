@@ -563,6 +563,7 @@ dependencies = [
  "chrono",
  "console",
  "dialoguer",
+ "fox-review",
  "jsonschema",
  "pulldown-cmark",
  "reqwest 0.12.28",
@@ -577,6 +578,23 @@ dependencies = [
  "tokio",
  "uuid",
  "webbrowser",
+]
+
+[[package]]
+name = "fox-review"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "httpdate",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

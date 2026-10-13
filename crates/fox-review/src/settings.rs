@@ -1,6 +1,6 @@
 use super::ReviewOptions;
 use anyhow::{bail, Context, Result};
-use std::{env, fmt};
+use std::{env, fmt, path::PathBuf};
 
 pub(crate) const DEFAULT_MAX_FILES: usize = 50;
 pub(crate) const DEFAULT_MAX_DIFF_CHARS: usize = 300_000;
@@ -16,6 +16,7 @@ pub(crate) struct ReviewSettings {
     pub(crate) provider: String,
     pub(crate) model: String,
     pub(crate) embedding_model: String,
+    pub(crate) embedding_cache: Option<PathBuf>,
     pub(crate) max_files: usize,
     pub(crate) max_diff_chars: usize,
     pub(crate) max_file_chars: usize,
@@ -33,6 +34,7 @@ impl fmt::Debug for ReviewSettings {
             .field("provider", &self.provider)
             .field("model", &self.model)
             .field("embedding_model", &self.embedding_model)
+            .field("embedding_cache", &self.embedding_cache)
             .field("max_files", &self.max_files)
             .field("max_diff_chars", &self.max_diff_chars)
             .field("max_file_chars", &self.max_file_chars)
@@ -95,6 +97,11 @@ impl ReviewSettings {
             provider,
             model,
             embedding_model,
+            embedding_cache: options
+                .embedding_cache
+                .clone()
+                .or_else(|| get("FOX_REVIEW_EMBEDDING_CACHE").map(PathBuf::from))
+                .filter(|value| !value.as_os_str().is_empty()),
             max_files: parse_limit(options.max_files, "FOX_REVIEW_MAX_FILES", DEFAULT_MAX_FILES)?,
             max_diff_chars: parse_limit(
                 options.max_diff_chars,
@@ -161,6 +168,7 @@ mod tests {
             ("OPENAI_API_KEY", "openai-secret"),
             ("FOX_REVIEW_MODEL", "env-model"),
             ("FOX_REVIEW_EMBEDDING_MODEL", "embed-model"),
+            ("FOX_REVIEW_EMBEDDING_CACHE", "cache/review.db"),
         ]);
         let settings = ReviewSettings::from_source(&options, |name| {
             values.get(name).map(|value| (*value).to_owned())
@@ -170,6 +178,10 @@ mod tests {
         assert_eq!(settings.model, "cli-model");
         assert_eq!(settings.max_files, 50);
         assert_eq!(settings.max_diff_chars, 300_000);
+        assert_eq!(
+            settings.embedding_cache,
+            Some(PathBuf::from("cache/review.db"))
+        );
     }
 
     #[test]

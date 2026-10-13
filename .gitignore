@@ -17,6 +17,7 @@ __pycache__/
 .fox-index.db
 .fox-index.db-shm
 .fox-index.db-wal
+.ai-review-cache/
 fox-metrics.log
 .fox-rag-contract.log
 mcp.log

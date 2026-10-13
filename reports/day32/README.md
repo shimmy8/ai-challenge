@@ -16,7 +16,8 @@ pull_request_target
 └── review: base.sha, OPENAI_API_KEY, pull-requests:write
     ├── GitHub API → metadata + changed files + patches
     ├── selection/batching → прозрачный partial coverage
-    ├── временный SQLite RAG → документация + код base-ветки
+    ├── content-addressed SQLite cache → только hashes + vectors
+    ├── semantic RAG или детерминированный lexical fallback
     ├── LLM JSON → path/line/evidence validation
     └── один sticky-комментарий
 ```
@@ -24,6 +25,21 @@ pull_request_target
 PR title/body, diff, test log и RAG chunks считаются недоверенными данными.
 Review job не checkout'ит head SHA и не выполняет код, build scripts или
 конфигурацию PR. Fork PR пропускаются до provider calls.
+
+Reviewer выделен в workspace crate `crates/fox-review`; privileged job собирает
+только `cargo build --release --package fox-review --bin fox-review`. Корневой
+`fox-llm review-pr` сохранён как совместимый адаптер.
+
+Cache `.ai-review-cache/review-rag.db` восстанавливается и сохраняется только в
+trusted review job. Namespace проверяет schema, OpenAI origin, embedding model,
+runtime dimensions и chunking version. Повреждение даёт cache miss, удалённые
+chunks pruning'уются, исходный текст и credentials в SQLite не записываются.
+
+Для временных embedding-ошибок выполняются максимум три попытки. После
+исчерпания `429`, `5xx`, timeout или transport error circuit breaker запрещает
+следующие embedding calls и включает `lexical_fallback` для всех batches.
+Permanent provider errors остаются фатальными. `review.json`, Markdown и
+Actions Summary явно показывают retrieval mode и cached/new counters.
 
 ## Пример при успешных тестах
 
@@ -55,6 +71,9 @@ Review job не checkout'ит head SHA и не выполняет код, build 
 ```
 
 `infrastructure_error` выводится отдельно и не представляется как дефект кода.
+При fallback Markdown дополнительно содержит предупреждение, а sticky-комментарий
+всё равно создаётся или обновляется. Для fork обе содержательные jobs имеют
+статус skipped; отдельная `fork-notice` job удалена.
 
 ## Ограничения
 
@@ -70,9 +89,10 @@ Review job не checkout'ит head SHA и не выполняет код, build 
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-openspec validate add-automated-pr-code-review --strict
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace
+node --test .github/scripts/publish-review.test.js
+openspec validate harden-ai-review-workflow --strict
 ```
 
 Контролируемые smoke tests в GitHub должны отдельно проверить PR с успешными и
