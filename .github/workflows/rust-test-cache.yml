@@ -1,0 +1,49 @@
+name: Warm Rust test cache
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: rust-test-cache-main
+  cancel-in-progress: true
+
+jobs:
+  warm-test-cache:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    cache-mode: write
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compute test cache key
+        id: test_cache_key
+        shell: bash
+        run: echo "rust=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Restore test build cache
+        id: test_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+          key: ${{ runner.os }}-fox-tests-${{ steps.test_cache_key.outputs.rust }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-fox-tests-${{ steps.test_cache_key.outputs.rust }}-
+      - name: Compile workspace tests
+        run: cargo test --workspace --no-run
+      - name: Save test build cache
+        if: steps.test_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+          key: ${{ runner.os }}-fox-tests-${{ steps.test_cache_key.outputs.rust }}-${{ hashFiles('Cargo.lock') }}

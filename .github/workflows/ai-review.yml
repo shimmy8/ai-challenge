@@ -13,6 +13,7 @@ jobs:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    cache-mode: read
     permissions:
       contents: read
     steps:
@@ -22,6 +23,20 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      - name: Compute test cache key
+        id: test_cache_key
+        shell: bash
+        run: echo "rust=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Restore trusted test build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+          key: ${{ runner.os }}-fox-tests-${{ steps.test_cache_key.outputs.rust }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-fox-tests-${{ steps.test_cache_key.outputs.rust }}-
       - name: Run tests
         id: cargo_test
         continue-on-error: true
@@ -70,6 +85,7 @@ jobs:
     if: always() && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    cache-mode: write
     permissions:
       contents: read
       pull-requests: write

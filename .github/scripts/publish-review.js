@@ -6,6 +6,19 @@ async function publishReview({ github, context, core, body, reviewResult }) {
   if (!reviewResult || !validModes.has(reviewResult.retrieval_mode)) {
     throw new Error('review JSON has invalid retrieval_mode');
   }
+  const validFallbackReasons = new Set([
+    'rate_limited', 'provider_unavailable', 'timeout', 'transport_error',
+  ]);
+  if (reviewResult.retrieval_mode === 'lexical_fallback') {
+    if (!validFallbackReasons.has(reviewResult.retrieval_fallback_reason)) {
+      throw new Error('review JSON has invalid retrieval_fallback_reason');
+    }
+  } else if (reviewResult.retrieval_fallback_reason !== null) {
+    throw new Error('embedding review must not have retrieval_fallback_reason');
+  }
+  if (!Array.isArray(reviewResult.change_summary)) {
+    throw new Error('review JSON has invalid change_summary');
+  }
   for (const field of ['cached_embeddings', 'new_embeddings']) {
     if (!Number.isSafeInteger(reviewResult[field]) || reviewResult[field] < 0) {
       throw new Error(`review JSON has invalid ${field}`);
@@ -29,6 +42,9 @@ async function publishReview({ github, context, core, body, reviewResult }) {
     .addRaw(
       'Tests: ' + status +
       '<br>Retrieval: ' + reviewResult.retrieval_mode +
+      (reviewResult.retrieval_fallback_reason
+        ? '<br>Fallback reason: ' + reviewResult.retrieval_fallback_reason
+        : '') +
       '<br>Cached embeddings: ' + reviewResult.cached_embeddings +
       '<br>New embeddings: ' + reviewResult.new_embeddings +
       '<br>Sticky comment updated.'

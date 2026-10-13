@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use reqwest::{header::RETRY_AFTER, Client, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     cmp::Ordering,
@@ -206,9 +206,19 @@ pub(crate) enum EmbeddingErrorKind {
     InvalidResponse,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RetrievalFallbackReason {
+    RateLimited,
+    ProviderUnavailable,
+    Timeout,
+    TransportError,
+}
+
 #[derive(Debug)]
 pub(crate) struct EmbeddingError {
     kind: EmbeddingErrorKind,
+    fallback_reason: Option<RetrievalFallbackReason>,
     message: String,
 }
 
@@ -216,23 +226,50 @@ impl EmbeddingError {
     pub(crate) fn retryable(message: impl Into<String>) -> Self {
         Self {
             kind: EmbeddingErrorKind::Retryable,
+            fallback_reason: Some(RetrievalFallbackReason::ProviderUnavailable),
+            message: message.into(),
+        }
+    }
+    fn rate_limited(message: impl Into<String>) -> Self {
+        Self {
+            kind: EmbeddingErrorKind::Retryable,
+            fallback_reason: Some(RetrievalFallbackReason::RateLimited),
+            message: message.into(),
+        }
+    }
+    fn timeout(message: impl Into<String>) -> Self {
+        Self {
+            kind: EmbeddingErrorKind::Retryable,
+            fallback_reason: Some(RetrievalFallbackReason::Timeout),
+            message: message.into(),
+        }
+    }
+    fn transport(message: impl Into<String>) -> Self {
+        Self {
+            kind: EmbeddingErrorKind::Retryable,
+            fallback_reason: Some(RetrievalFallbackReason::TransportError),
             message: message.into(),
         }
     }
     pub(crate) fn permanent(message: impl Into<String>) -> Self {
         Self {
             kind: EmbeddingErrorKind::Permanent,
+            fallback_reason: None,
             message: message.into(),
         }
     }
     pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self {
             kind: EmbeddingErrorKind::InvalidResponse,
+            fallback_reason: None,
             message: message.into(),
         }
     }
     pub(crate) fn is_retryable(&self) -> bool {
         self.kind == EmbeddingErrorKind::Retryable
+    }
+    pub(crate) fn fallback_reason(&self) -> Option<RetrievalFallbackReason> {
+        self.fallback_reason
     }
 }
 
@@ -291,13 +328,21 @@ impl OpenAiReviewEmbeddingProvider {
         let response = self.client.post(&self.endpoint).bearer_auth(&self.api_key)
             .json(&serde_json::json!({"model": self.model, "input": inputs, "encoding_format": "float"}))
             .send().await.map_err(|error| {
-                let message = if error.is_timeout() { "embedding API timeout" } else { "embedding API transport error" };
-                (EmbeddingError::retryable(message), None)
+                let error = if error.is_timeout() {
+                    EmbeddingError::timeout("embedding API timeout")
+                } else {
+                    EmbeddingError::transport("embedding API transport error")
+                };
+                (error, None)
             })?;
         let status = response.status();
         let retry_after = parse_retry_after(response.headers().get(RETRY_AFTER));
         if !status.is_success() {
-            let error = if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            let error = if status == StatusCode::TOO_MANY_REQUESTS {
+                EmbeddingError::rate_limited(format!(
+                    "embedding API временно недоступен ({status})"
+                ))
+            } else if status.is_server_error() {
                 EmbeddingError::retryable(format!("embedding API временно недоступен ({status})"))
             } else {
                 EmbeddingError::permanent(format!("embedding API отклонил запрос ({status})"))
@@ -621,6 +666,10 @@ mod tests {
         );
         let error = provider.embed(&["query".to_owned()]).await.unwrap_err();
         assert!(error.is_retryable());
+        assert_eq!(
+            error.fallback_reason(),
+            Some(RetrievalFallbackReason::RateLimited)
+        );
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 3);
         assert!(!error.to_string().contains("sensitive"));
         assert!(!error.to_string().contains("test-key"));
@@ -735,6 +784,10 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.is_retryable());
+        assert_eq!(
+            error.fallback_reason(),
+            Some(RetrievalFallbackReason::Timeout)
+        );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -748,6 +801,10 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.is_retryable());
+        assert_eq!(
+            error.fallback_reason(),
+            Some(RetrievalFallbackReason::TransportError)
+        );
         assert!(backoff_with_jitter(20, &["query".to_owned()]) > Duration::ZERO);
         assert_eq!(
             retry_delay(Some(Duration::from_secs(100)), 0, &[]),
