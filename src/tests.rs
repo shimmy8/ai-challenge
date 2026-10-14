@@ -1977,6 +1977,167 @@ mod suite {
     }
 
     #[test]
+    fn model_discovery_requests_preserve_provider_contracts() {
+        let client = Client::new();
+        let mut config = Config::default();
+        config.set_key(Provider::Openai, "openai-test-key".into());
+        config.set_key(Provider::Claude, "claude-test-key".into());
+        config
+            .set_ollama_remote_endpoint("http://192.0.2.10:11435")
+            .unwrap();
+
+        let openai = build_models_request(&client, &config, Provider::Openai)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(openai.url().as_str(), OPENAI_MODELS_URL);
+        assert_eq!(
+            openai.headers()[reqwest::header::AUTHORIZATION],
+            "Bearer openai-test-key"
+        );
+
+        let claude = build_models_request(&client, &config, Provider::Claude)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            claude.url().as_str(),
+            format!("{CLAUDE_MODELS_URL}?limit=1000")
+        );
+        assert_eq!(claude.headers()["x-api-key"], "claude-test-key");
+        assert_eq!(claude.headers()["anthropic-version"], "2023-06-01");
+        assert!(!claude
+            .headers()
+            .contains_key(reqwest::header::AUTHORIZATION));
+
+        for (provider, expected_url) in [
+            (Provider::Ollama, OLLAMA_MODELS_URL.to_owned()),
+            (
+                Provider::OllamaRemote,
+                "http://192.0.2.10:11435/v1/models".to_owned(),
+            ),
+        ] {
+            let request = build_models_request(&client, &config, provider)
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(request.url().as_str(), expected_url);
+            assert!(!request
+                .headers()
+                .contains_key(reqwest::header::AUTHORIZATION));
+        }
+    }
+
+    #[test]
+    fn model_discovery_parsing_preserves_provider_filters() {
+        for provider in [Provider::Claude, Provider::Ollama, Provider::OllamaRemote] {
+            let body = json!({
+                "data": [
+                    {"id": "model-z"},
+                    {"id": ""},
+                    {"id": "model-a"},
+                    {"id": "model-z"},
+                    {"missing": "id"}
+                ]
+            });
+            assert_eq!(
+                parse_model_ids(&body, provider).unwrap(),
+                vec!["model-a".to_owned(), "model-z".to_owned()]
+            );
+        }
+
+        let openai = json!({
+            "data": [
+                {"id": "gpt-5.6-luna"},
+                {"id": "o4-mini"},
+                {"id": "ft:gpt-4.1:team:custom:id"},
+                {"id": "gpt-3.5-turbo-instruct"},
+                {"id": "gpt-realtime"},
+                {"id": "gpt-4o-mini-transcribe"},
+                {"id": "gpt-image-1"},
+                {"id": "o3-deep-research"},
+                {"id": "omni-moderation-latest"},
+                {"id": "gpt-5.6-luna"}
+            ]
+        });
+        assert_eq!(
+            parse_model_ids(&openai, Provider::Openai).unwrap(),
+            vec![
+                "ft:gpt-4.1:team:custom:id".to_owned(),
+                "gpt-5.6-luna".to_owned(),
+                "o4-mini".to_owned()
+            ]
+        );
+        assert!(parse_model_ids(&json!({"models": []}), Provider::Openai).is_err());
+    }
+
+    #[tokio::test]
+    async fn model_discovery_errors_are_safe_and_keep_russian_context() {
+        use axum::{http::StatusCode, routing::get, Json, Router};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/v1/models",
+            get(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "error": {"message": "доступ запрещён"},
+                        "debug": "full-response-body-marker",
+                        "api_key": "sk-test-secret"
+                    })),
+                )
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut config = Config::default();
+        config
+            .set_ollama_remote_endpoint(&format!("http://{address}"))
+            .unwrap();
+
+        let error = fetch_models(&Client::new(), &config, Provider::OllamaRemote)
+            .await
+            .unwrap_err()
+            .to_string();
+        server.abort();
+        assert!(error.contains("Ollama Remote вернул 401"));
+        assert!(error.contains("доступ запрещён"));
+        assert!(!error.contains("full-response-body-marker"));
+        assert!(!error.contains("sk-test-secret"));
+    }
+
+    #[test]
+    fn model_discovery_error_messages_are_stable() {
+        for (provider, connection_error, empty_error) in [
+            (
+                Provider::Openai,
+                "не удалось получить модели OpenAI",
+                "OpenAI не вернул ни одной совместимой модели",
+            ),
+            (
+                Provider::Claude,
+                "не удалось получить модели Anthropic",
+                "Claude не вернул ни одной совместимой модели",
+            ),
+            (
+                Provider::Ollama,
+                "Ollama недоступна: запустите локальный сервер Ollama",
+                "в Ollama нет установленных моделей; выполните `ollama pull qwen3.5:4b`",
+            ),
+            (
+                Provider::OllamaRemote,
+                "Ollama Remote недоступна: проверьте Raspberry Pi и настроенный endpoint",
+                "в Ollama Remote нет установленных моделей; установите `qwen3:1.7b` на удалённом сервере",
+            ),
+        ] {
+            assert_eq!(model_discovery_connection_error(provider), connection_error);
+            assert_eq!(empty_models_error(provider).to_string(), empty_error);
+        }
+    }
+
+    #[test]
     pub(crate) fn filters_out_openai_models_for_other_apis() {
         let body = json!({
             "data": [
@@ -2489,6 +2650,262 @@ mod suite {
         let encoded = encode_messages_toon(&messages);
         assert!(encoded.starts_with("messages[2]{role,content}:"));
         assert_eq!(decode_messages_toon(&encoded).unwrap(), messages);
+    }
+
+    #[test]
+    fn sqlite_current_schema_is_complete_and_reopen_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("current-schema.db");
+        let store = SessionStore::open(&path).unwrap();
+
+        for table in [
+            "profiles",
+            "memory_entries",
+            "invariants",
+            "tasks",
+            "task_step_results",
+            "sessions",
+            "session_context",
+            "session_branches",
+            "session_checkpoints",
+        ] {
+            let exists: bool = store
+                .connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing table {table}");
+        }
+
+        for (table, columns) in [
+            (
+                "profiles",
+                &["id", "name", "instructions", "created_at", "updated_at"][..],
+            ),
+            ("memory_entries", &["id", "content", "created_at"]),
+            ("invariants", &["id", "content", "enabled", "created_at"]),
+            (
+                "tasks",
+                &[
+                    "id",
+                    "title",
+                    "todo",
+                    "phase",
+                    "plan_version",
+                    "approved_plan_version",
+                    "created_at",
+                    "updated_at",
+                ],
+            ),
+            (
+                "task_step_results",
+                &["task_id", "phase", "item_id", "summary", "content"],
+            ),
+            (
+                "sessions",
+                &[
+                    "id",
+                    "title",
+                    "provider",
+                    "model",
+                    "mode",
+                    "temperature",
+                    "history_toon",
+                    "profile_id",
+                    "task_id",
+                    "created_at",
+                    "updated_at",
+                ],
+            ),
+            (
+                "session_context",
+                &[
+                    "session_id",
+                    "summary",
+                    "summarized_count",
+                    "facts_json",
+                    "compression_strategy",
+                    "context_messages",
+                    "branch_pending",
+                ],
+            ),
+            (
+                "session_branches",
+                &[
+                    "session_id",
+                    "name",
+                    "history_toon",
+                    "summary",
+                    "facts_json",
+                    "is_active",
+                ],
+            ),
+            (
+                "session_checkpoints",
+                &["session_id", "history_toon", "summary", "facts_json"],
+            ),
+        ] {
+            let mut statement = store
+                .connection
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let actual = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            let expected = columns
+                .iter()
+                .map(|column| (*column).to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "unexpected columns for {table}");
+        }
+
+        for (table, column, expected_default) in [
+            ("profiles", "created_at", "CURRENT_TIMESTAMP"),
+            ("profiles", "updated_at", "CURRENT_TIMESTAMP"),
+            ("memory_entries", "created_at", "CURRENT_TIMESTAMP"),
+            ("tasks", "plan_version", "0"),
+            ("tasks", "phase", "'planning'"),
+            ("tasks", "created_at", "CURRENT_TIMESTAMP"),
+            ("tasks", "updated_at", "CURRENT_TIMESTAMP"),
+            ("invariants", "enabled", "1"),
+            ("invariants", "created_at", "CURRENT_TIMESTAMP"),
+            ("sessions", "created_at", "CURRENT_TIMESTAMP"),
+            ("sessions", "updated_at", "CURRENT_TIMESTAMP"),
+            ("session_context", "facts_json", "'{}'"),
+            ("session_context", "compression_strategy", "'summary'"),
+            ("session_context", "context_messages", "10"),
+            ("session_context", "branch_pending", "0"),
+            ("session_branches", "is_active", "0"),
+        ] {
+            let default: String = store
+                .connection
+                .query_row(
+                    &format!("SELECT dflt_value FROM pragma_table_info('{table}') WHERE name = ?1"),
+                    [column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                default, expected_default,
+                "unexpected default for {table}.{column}"
+            );
+        }
+
+        drop(store);
+        SessionStore::open(&path).unwrap();
+    }
+
+    #[test]
+    fn sqlite_legacy_columns_are_added_without_data_loss() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy-columns.db");
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE tasks (
+                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+                         title TEXT NOT NULL,
+                         todo TEXT NOT NULL,
+                         phase TEXT NOT NULL DEFAULT 'planning',
+                         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                     );
+                     CREATE TABLE invariants (
+                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+                         content TEXT NOT NULL,
+                         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                     );
+                     CREATE TABLE sessions (
+                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+                         title TEXT NOT NULL,
+                         provider TEXT NOT NULL,
+                         model TEXT NOT NULL,
+                         mode TEXT,
+                         temperature REAL NOT NULL,
+                         history_toon TEXT NOT NULL,
+                         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                     );
+                     CREATE TABLE session_context (
+                         session_id INTEGER PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                         summary TEXT NOT NULL,
+                         summarized_count INTEGER NOT NULL
+                     );
+                     INSERT INTO tasks (title, todo) VALUES ('legacy task', 'legacy todo');
+                     INSERT INTO invariants (content) VALUES ('legacy invariant');
+                     INSERT INTO sessions
+                         (title, provider, model, temperature, history_toon)
+                         VALUES ('legacy session', 'openai', 'legacy model', 1.0, 'messages[0]{role,content}:');
+                     INSERT INTO session_context (session_id, summary, summarized_count)
+                         VALUES (1, 'legacy summary', 7);",
+                )
+                .unwrap();
+        }
+
+        let store = SessionStore::open(&path).unwrap();
+        let task: (String, String, i64, Option<i64>) = store
+            .connection
+            .query_row(
+                "SELECT title, todo, plan_version, approved_plan_version FROM tasks WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(task, ("legacy task".into(), "legacy todo".into(), 0, None));
+        let invariant: (String, i64) = store
+            .connection
+            .query_row(
+                "SELECT content, enabled FROM invariants WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(invariant, ("legacy invariant".into(), 1));
+        let session: (String, Option<i64>, Option<i64>) = store
+            .connection
+            .query_row(
+                "SELECT title, profile_id, task_id FROM sessions WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(session, ("legacy session".into(), None, None));
+        let context: (String, i64, String, String, i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT summary, summarized_count, facts_json, compression_strategy,
+                        context_messages, branch_pending
+                 FROM session_context WHERE session_id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            context,
+            (
+                "legacy summary".into(),
+                7,
+                "{}".into(),
+                "summary".into(),
+                10,
+                0
+            )
+        );
     }
 
     #[test]
