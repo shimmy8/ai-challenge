@@ -107,8 +107,7 @@ node --test .github/scripts/publish-review.test.js
 openspec validate harden-ai-review-workflow --strict
 ```
 
-Контролируемые smoke tests в GitHub должны отдельно проверить PR с успешными и
-упавшими тестами: review запускается в обоих случаях, failed test job остаётся
-красным, обновляется один sticky-комментарий, partial coverage видим, а secrets
-не появляются в логах. До фактического запуска этих PR проверка не считается
-выполненной.
+14 октября 2026 года сопровождающий подтвердил controlled smoke-test на реальном
+same-repository PR после итоговых исправлений. Проверка охватила повторный запуск
+review с межзапусковым RAG cache и публикацию sticky-комментария; чувствительные
+данные и содержимое cache в отчёт не включены.
