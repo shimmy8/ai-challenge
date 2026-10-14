@@ -164,94 +164,15 @@ pub(crate) fn build_prompt(
     ))
 }
 
-fn answer_is_russian(answer: &BatchAnswer) -> bool {
-    fn is_russian_text(value: &str) -> bool {
-        fn allowed_technical_word(word: &str) -> bool {
-            matches!(
-                word,
-                "API"
-                    | "CI"
-                    | "CLI"
-                    | "HTTP"
-                    | "HTTPS"
-                    | "JSON"
-                    | "LLM"
-                    | "MCP"
-                    | "PR"
-                    | "RAG"
-                    | "SHA"
-                    | "SQL"
-                    | "URI"
-                    | "URL"
-                    | "UUID"
-                    | "UTF"
-                    | "Rust"
-                    | "Cargo"
-                    | "GitHub"
-                    | "OpenAI"
-                    | "SQLite"
-                    | "macOS"
-            )
-        }
-
-        let mut prose = String::with_capacity(value.len());
-        let mut inline_code = false;
-        for character in value.chars() {
-            if character == '`' {
-                inline_code = !inline_code;
-            } else if !inline_code {
-                prose.push(character);
-            }
-        }
-        let has_cyrillic = prose.chars().any(
-            |character| matches!(character, '\u{0400}'..='\u{04ff}' | '\u{0500}'..='\u{052f}'),
-        );
-        let has_english_prose = prose
-            .split(|character: char| !character.is_ascii_alphabetic())
-            .filter(|word| !word.is_empty())
-            .any(|word| !allowed_technical_word(word));
-        has_cyrillic && !has_english_prose
-    }
-
-    answer
-        .change_summary
-        .iter()
-        .all(|item| is_russian_text(&item.summary))
-        && answer.findings.iter().all(|finding| {
-            is_russian_text(&finding.title)
-                && is_russian_text(&finding.explanation)
-                && is_russian_text(&finding.recommendation)
-        })
-        && answer
-            .test_failure_explanation
-            .as_ref()
-            .is_none_or(|explanation| is_russian_text(&explanation.summary))
-}
-
-async fn request_russian_answer(
+async fn request_batch_answer(
     chat_provider: &dyn ReviewChatProvider,
     prompt: &str,
     timeout: Duration,
 ) -> Result<BatchAnswer> {
-    for attempt in 0..2 {
-        let retry_prompt;
-        let active_prompt = if attempt == 0 {
-            prompt
-        } else {
-            retry_prompt = format!(
-                "TRUSTED CORRECTION: The previous response violated the language contract. Return the complete JSON response again. Every human-readable field MUST be in Russian and contain Cyrillic text. Keep paths, enum values, technical identifiers, and evidence_ids unchanged.\n\n{prompt}"
-            );
-            &retry_prompt
-        };
-        let raw = tokio::time::timeout(timeout, chat_provider.review(active_prompt))
-            .await
-            .context("review model timeout")??;
-        let answer = parse_batch_answer(&raw)?;
-        if answer_is_russian(&answer) {
-            return Ok(answer);
-        }
-    }
-    anyhow::bail!("модель дважды нарушила требование русского языка")
+    let raw = tokio::time::timeout(timeout, chat_provider.review(prompt))
+        .await
+        .context("review model timeout")??;
+    parse_batch_answer(&raw)
 }
 
 fn parse_batch_answer(raw: &str) -> Result<BatchAnswer> {
@@ -745,7 +666,7 @@ async fn analyze_snapshot(
     let mut answers = Vec::new();
     for (batch, context) in batches.into_iter().zip(&retrieval.contexts) {
         let prompt = build_prompt(&snapshot, &batch, &report, context)?;
-        let answer = request_russian_answer(chat_provider, &prompt, timeouts.chat).await?;
+        let answer = request_batch_answer(chat_provider, &prompt, timeouts.chat).await?;
         answers.push(validate_answer(answer, &batch, &report, context)?);
     }
     let (change_summary, findings, explanation) = aggregate(answers, settings.max_findings);
@@ -1616,43 +1537,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn english_review_is_retried_once_and_never_returned() {
-        let english = r#"{"change_summary":[{"summary":"Updated library","evidence_ids":["diff:src/lib.rs"]}],"findings":[],"test_failure_explanation":null}"#;
-        let russian = r#"{"change_summary":[{"summary":"Обновлена библиотека","evidence_ids":["diff:src/lib.rs"]}],"findings":[],"test_failure_explanation":null}"#;
-        let repaired = SequencedChat::new([english, russian]);
+    async fn language_requirement_is_prompt_only_and_generation_is_not_retried() {
+        let response = r#"{"change_summary":[{"summary":"Обновлён workflow cache для lexical fallback","evidence_ids":["diff:src/lib.rs"]}],"findings":[],"test_failure_explanation":null}"#;
+        let chat = SequencedChat::new([response]);
 
-        let answer = request_russian_answer(&repaired, "trusted prompt", Duration::from_secs(1))
+        let answer = request_batch_answer(&chat, "trusted prompt", Duration::from_secs(1))
             .await
             .unwrap();
 
-        assert_eq!(answer.change_summary[0].summary, "Обновлена библиотека");
-        {
-            let prompts = repaired.prompts.lock().unwrap();
-            assert_eq!(prompts.len(), 2);
-            assert!(prompts[1].contains("MUST be in Russian"));
-        }
-
-        let rejected = SequencedChat::new([english, english]);
-        let error = request_russian_answer(&rejected, "trusted prompt", Duration::from_secs(1))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("дважды нарушила"));
-        assert_eq!(rejected.prompts.lock().unwrap().len(), 2);
-
-        let mixed = r#"{"change_summary":[{"summary":"Updated library а","evidence_ids":["diff:src/lib.rs"]}],"findings":[],"test_failure_explanation":null}"#;
-        let rejected = SequencedChat::new([mixed, mixed]);
-        assert!(
-            request_russian_answer(&rejected, "trusted prompt", Duration::from_secs(1))
-                .await
-                .is_err()
+        assert_eq!(
+            answer.change_summary[0].summary,
+            "Обновлён workflow cache для lexical fallback"
         );
-        let uppercase = r#"{"change_summary":[{"summary":"UPDATED LIBRARY А","evidence_ids":["diff:src/lib.rs"]}],"findings":[],"test_failure_explanation":null}"#;
-        let rejected = SequencedChat::new([uppercase, uppercase]);
-        assert!(
-            request_russian_answer(&rejected, "trusted prompt", Duration::from_secs(1))
-                .await
-                .is_err()
-        );
+        assert_eq!(chat.prompts.lock().unwrap().as_slice(), ["trusted prompt"]);
     }
 
     #[tokio::test]
@@ -1731,6 +1628,9 @@ mod tests {
         assert!(prompt.contains("Do not call tools"));
         assert!(prompt.contains("change_summary"));
         assert!(prompt.contains("human-readable field in Russian"));
+        assert!(prompt.contains(
+            "change_summary.summary, findings.title, findings.explanation, findings.recommendation, and test_failure_explanation.summary"
+        ));
         let timeouts = ReviewTimeouts::default();
         assert_eq!(EMBEDDING_REQUEST_TIMEOUT, Duration::from_secs(30));
         assert_eq!(timeouts.embedding, Duration::from_secs(300));
