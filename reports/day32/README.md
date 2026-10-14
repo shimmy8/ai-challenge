@@ -34,6 +34,9 @@ Cache `.ai-review-cache/review-rag.db` восстанавливается и с�
 trusted review job. Namespace проверяет schema, OpenAI origin, embedding model,
 runtime dimensions и chunking version. Повреждение даёт cache miss, удалённые
 chunks pruning'уются, исходный текст и credentials в SQLite не записываются.
+Изменившийся cache сохраняется даже при последующей ошибке generation или
+публикации комментария, чтобы следующий trusted запуск не повторял уже
+выполненный прогрев.
 
 Для временных embedding-ошибок выполняются максимум три попытки. После
 исчерпания `429`, `5xx`, timeout или transport error circuit breaker запрещает

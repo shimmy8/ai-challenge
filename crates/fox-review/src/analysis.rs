@@ -1856,9 +1856,34 @@ mod tests {
         assert!(workflow.contains("actions/cache/restore@v4"));
         assert!(workflow.contains("actions/cache/save@v4"));
         assert!(workflow.contains("steps.cache_after.outputs.changed == 'true'"));
+        assert!(workflow.contains(
+            "- name: Detect updated review cache\n        id: cache_after\n        if: always()"
+        ));
+        assert!(workflow.contains(
+            "if: always() && steps.cache_after.outputs.exists == 'true' && steps.cache_after.outputs.changed == 'true'"
+        ));
+        assert!(!workflow.contains(
+            "if: steps.review.outcome == 'success' && steps.publish.outcome == 'success'"
+        ));
         assert!(workflow.contains("REVIEW_JSON_PATH: review.json"));
         assert!(!workflow.contains("fork-notice:"));
         assert!(workflow.contains("if: always() && steps.review.outcome == 'success'"));
+        let generate_position = workflow.find("- name: Generate AI review").unwrap();
+        let publish_position = workflow
+            .find("- name: Create or update sticky review comment")
+            .unwrap();
+        let detect_position = workflow
+            .find("- name: Detect updated review cache")
+            .unwrap();
+        let save_position = workflow.find("- name: Save trusted review cache").unwrap();
+        assert!(generate_position < publish_position);
+        assert!(publish_position < detect_position);
+        assert!(detect_position < save_position);
+        let cache_detection = &workflow[detect_position..save_position];
+        assert!(cache_detection.contains("echo \"exists=true\" >> \"$GITHUB_OUTPUT\""));
+        assert!(cache_detection.contains("echo \"exists=false\" >> \"$GITHUB_OUTPUT\""));
+        assert!(cache_detection.contains("echo \"changed=true\" >> \"$GITHUB_OUTPUT\""));
+        assert!(cache_detection.contains("echo \"changed=false\" >> \"$GITHUB_OUTPUT\""));
         let tests_job = workflow.split("  review:").next().unwrap();
         assert!(!tests_job.contains("OPENAI_API_KEY"));
         assert!(!tests_job.contains("pull-requests: write"));

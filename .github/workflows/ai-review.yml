@@ -209,19 +209,21 @@ jobs:
             await publishReview({ github, context, core, body, reviewResult });
       - name: Detect updated review cache
         id: cache_after
-        if: always() && steps.review.outcome == 'success'
+        if: always()
         shell: bash
         env:
           BEFORE_SHA: ${{ steps.cache_before.outputs.sha }}
         run: |
           if [[ -f .ai-review-cache/review-rag.db ]]; then
             after=$(sha256sum .ai-review-cache/review-rag.db | cut -d' ' -f1)
+            echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             after=missing
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
           if [[ "$after" != "$BEFORE_SHA" ]]; then echo "changed=true" >> "$GITHUB_OUTPUT"; else echo "changed=false" >> "$GITHUB_OUTPUT"; fi
       - name: Save trusted review cache
-        if: steps.review.outcome == 'success' && steps.publish.outcome == 'success' && steps.cache_after.outputs.changed == 'true'
+        if: always() && steps.cache_after.outputs.exists == 'true' && steps.cache_after.outputs.changed == 'true'
         uses: actions/cache/save@v4
         with:
           path: .ai-review-cache/review-rag.db
