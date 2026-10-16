@@ -151,6 +151,47 @@ Runner изолирует сценарии, но сохраняет истори
 facts, ожидаемые пути источников и наличие раздела `Источники`. Существующий
 `rag-eval` остаётся независимым single-turn сравнением без истории и памяти.
 
+## Локальный ассистент поддержки linkding
+
+Режим `support` одной командой запускает loopback HTTP-сервер с веб-интерфейсом,
+JSON API и внутренним MCP-сервером тикетов. Сначала постройте отдельный structural
+RAG-индекс из зафиксированного корпуса:
+
+```bash
+cargo run -- index \
+  --source reports/day33/knowledge-base \
+  --strategy structural \
+  --index-path .fox-linkding-index.db
+```
+
+Затем запустите сервис и откройте напечатанный URL:
+
+```bash
+cargo run -- support \
+  --addr 127.0.0.1:8088 \
+  --ticket-db .fox-support.db \
+  --index-path .fox-linkding-index.db
+```
+
+`--addr` обязателен и принимает только loopback-адрес. Публикация сервиса во
+внешнюю сеть намеренно запрещена: в учебной версии нет login, TLS и разграничения
+доступа. Пути к БД и индексу необязательны; показанные значения используются по
+умолчанию и не пересекаются с `.fox-sessions.db` и `.fox-index.db`.
+
+API обслуживается на том же адресе:
+
+- `POST /api/tickets` — поля `name`, `email`, `subject`, `description`; создаёт
+  тикет и сразу запускает первый grounded-ответ;
+- `GET /api/tickets/{id}` — карточка и ограниченная история тикета;
+- `POST /api/tickets/{id}/messages` — поле `message`; сохраняет вопрос и
+  возвращает следующий ответ с citations.
+
+Для модели и embeddings используются уже настроенные локальные конфигурации.
+Внутренний MCP доступен только процессу support, а definitions его write-tools
+не передаются модели. При сбое RAG или провайдера вопрос остаётся в тикете, а API
+возвращает безопасный error envelope с `message_saved: true`. Подробный сценарий
+и provenance корпуса: [`reports/day33/README.md`](reports/day33/README.md).
+
 ## Ассистент разработчика
 
 Команда `/help` без аргументов по-прежнему показывает список CLI-команд. Чтобы

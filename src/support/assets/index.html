@@ -1,0 +1,6 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fox Support</title><link rel="stylesheet" href="/assets/support.css"></head>
+<body><main><header><span class="eyebrow">FOX SUPPORT</span><h1>Поддержка linkding</h1><p>Опишите проблему — ассистент учтёт тикет и найдёт ответ в документации.</p></header>
+<section id="create"><form id="ticket-form"><label>Имя<input name="name" required maxlength="120"></label><label>Email<input name="email" type="email" required maxlength="254"></label><label>Тема<input name="subject" required maxlength="200"></label><label>Что случилось?<textarea name="description" required maxlength="8000"></textarea></label><button>Создать тикет</button></form></section>
+<section id="chat" hidden><div class="ticket-head"><div><span id="ticket-id"></span><h2 id="ticket-subject"></h2></div><span class="status">Открыт</span></div><div id="messages" aria-live="polite"></div><form id="message-form"><textarea name="message" required maxlength="8000" placeholder="Уточните вопрос…"></textarea><button>Отправить</button></form></section>
+<div id="error" role="alert" hidden></div></main><script src="/assets/support.js"></script></body></html>

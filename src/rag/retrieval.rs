@@ -22,6 +22,7 @@ pub(crate) const DEFAULT_RAG_CONTEXT_CHARS: usize = 6000;
 pub(crate) enum RetrievalSourceScope {
     All,
     ProjectDocumentation,
+    SupportDocumentation,
 }
 
 impl RetrievalSourceScope {
@@ -30,6 +31,9 @@ impl RetrievalSourceScope {
             Self::All => true,
             Self::ProjectDocumentation => {
                 source == "README.md" || source.starts_with("openspec/specs/")
+            }
+            Self::SupportDocumentation => {
+                source.starts_with("reports/day33/knowledge-base/") && source.ends_with(".md")
             }
         }
     }
@@ -632,6 +636,16 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn support_scope_allows_only_day33_markdown_corpus() {
+        let scope = RetrievalSourceScope::SupportDocumentation;
+        assert!(scope.allows("reports/day33/knowledge-base/faq.md"));
+        assert!(!scope.allows("reports/day33/knowledge-base/private.json"));
+        assert!(!scope.allows("reports/day32/README.md"));
+        assert!(!scope.allows("README.md"));
+        assert!(!scope.allows("openspec/specs/support.md"));
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@ mod providers;
 mod rag;
 mod sessions;
 mod summarization;
+mod support;
 mod tests;
 
 pub(crate) use agent::*;
@@ -24,6 +25,7 @@ pub(crate) use providers::*;
 pub(crate) use rag::*;
 pub(crate) use sessions::*;
 pub(crate) use summarization::*;
+pub(crate) use support::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

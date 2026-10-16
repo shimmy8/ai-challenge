@@ -160,6 +160,9 @@ pub(crate) async fn run() -> Result<()> {
     if let StartupMode::Index(options) = startup_mode {
         return run_indexing(options).await;
     }
+    if let StartupMode::Support(options) = startup_mode {
+        return crate::support::run_support(options).await;
+    }
     if let StartupMode::RagEval(options) = startup_mode {
         return run_rag_evaluation(options).await;
     }

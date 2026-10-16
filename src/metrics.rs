@@ -23,7 +23,8 @@ pub(crate) fn parse_dump_metrics_flag(args: impl IntoIterator<Item = String>) ->
         | StartupMode::RagEval(_)
         | StartupMode::RagChatEval(_)
         | StartupMode::ReviewPr(_)
-        | StartupMode::SummarizeEval(_) => {
+        | StartupMode::SummarizeEval(_)
+        | StartupMode::Support(_) => {
             bail!("этот startup-режим нельзя использовать как флаг метрик")
         }
     }
@@ -43,6 +44,7 @@ pub(crate) enum StartupMode {
     RagChatEval(crate::rag::RagChatEvalOptions),
     ReviewPr(fox_review::ReviewOptions),
     SummarizeEval(crate::summarization::SummarizeEvalOptions),
+    Support(crate::support::SupportOptions),
 }
 
 pub(crate) fn parse_startup_mode(args: impl IntoIterator<Item = String>) -> Result<StartupMode> {
@@ -59,6 +61,11 @@ pub(crate) fn parse_startup_mode(args: impl IntoIterator<Item = String>) -> Resu
     }
     if args.first().is_some_and(|value| value == "index") {
         return Ok(StartupMode::Index(crate::rag::parse_index_options(
+            &args[1..],
+        )?));
+    }
+    if args.first().is_some_and(|value| value == "support") {
+        return Ok(StartupMode::Support(crate::support::parse_support_options(
             &args[1..],
         )?));
     }
@@ -87,7 +94,7 @@ pub(crate) fn parse_startup_mode(args: impl IntoIterator<Item = String>) -> Resu
         match argument.as_str() {
             "--dump-metrics" if !dump_metrics => dump_metrics = true,
             "--dump-metrics" => bail!("аргумент указан более одного раза: {argument}"),
-            _ => bail!("неизвестный аргумент: {argument}. Доступны index, rag-eval, rag-chat-eval, summarize-eval, --dump-metrics и --mcp-server <kind> --addr <loopback:port>"),
+            _ => bail!("неизвестный аргумент: {argument}. Доступны support, index, rag-eval, rag-chat-eval, summarize-eval, --dump-metrics и --mcp-server <kind> --addr <loopback:port>"),
         }
     }
     Ok(StartupMode::Interactive { dump_metrics })

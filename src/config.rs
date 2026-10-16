@@ -275,6 +275,52 @@ impl Default for Config {
 }
 
 impl Config {
+    pub(crate) fn load_read_only(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("не удалось прочитать {}", path.display()))?;
+        let value: Value = serde_json::from_str(&raw).context("повреждён файл конфигурации")?;
+        if value.get("providers").is_some() {
+            let mut config: Self =
+                serde_json::from_value(value).context("повреждён файл конфигурации")?;
+            anyhow::ensure!(config.context_messages <= 1000, "размер окна вне диапазона");
+            config.mcp.validate()?;
+            config.ensure_provider_defaults();
+            config.normalize_remote_endpoint()?;
+            return Ok(config);
+        }
+
+        let legacy: LegacyConfig =
+            serde_json::from_value(value).context("повреждён старый файл конфигурации")?;
+        Ok(Self {
+            compression_strategy: CompressionStrategy::Summary,
+            context_messages: default_context_messages(),
+            last_provider: legacy.last_provider,
+            last_mode: None,
+            mcp: McpConfig::default(),
+            providers: vec![
+                ProviderConfig {
+                    provider: Provider::Openai,
+                    api_key: legacy.openai_api_key,
+                    model: legacy.openai_model,
+                    temperature: default_temperature(),
+                    endpoint: None,
+                },
+                ProviderConfig {
+                    provider: Provider::Claude,
+                    api_key: legacy.claude_api_key,
+                    model: legacy.claude_model,
+                    temperature: default_temperature(),
+                    endpoint: None,
+                },
+                default_provider_config(Provider::Ollama),
+                default_provider_config(Provider::OllamaRemote),
+            ],
+        })
+    }
+
     pub(crate) fn load_without_mcp_registry(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
