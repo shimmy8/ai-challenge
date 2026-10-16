@@ -26,6 +26,9 @@ mod group_servers;
 mod help_runtime;
 mod orchestrator;
 mod pipeline;
+mod project_assistant;
+mod project_files;
+mod project_runtime;
 mod report;
 mod scheduler;
 mod server;
@@ -42,6 +45,9 @@ pub(crate) use group_servers::*;
 pub(crate) use help_runtime::*;
 pub(crate) use orchestrator::*;
 pub(crate) use pipeline::*;
+pub(crate) use project_assistant::*;
+pub(crate) use project_files::*;
+pub(crate) use project_runtime::*;
 pub(crate) use report::*;
 pub(crate) use scheduler::*;
 pub(crate) use server::run_mcp_server;
@@ -361,7 +367,7 @@ pub(crate) fn log_local_call(
 }
 
 fn should_log_local_call(server_id: &str) -> bool {
-    server_id != "project-help"
+    !matches!(server_id, "project-help" | "project")
 }
 
 impl McpSession {
@@ -742,6 +748,7 @@ mod tests {
     #[test]
     fn project_help_server_calls_are_not_written_to_stdout() {
         assert!(!should_log_local_call("project-help"));
+        assert!(!should_log_local_call("project"));
         assert!(should_log_local_call("workspace"));
         assert!(should_log_local_call("github"));
     }

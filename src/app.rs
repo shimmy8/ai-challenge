@@ -26,6 +26,34 @@ use std::{
 
 struct InteractiveToolApproval;
 
+struct InteractiveProjectApproval {
+    root: PathBuf,
+}
+
+fn record_project_outcome(
+    agents: &mut AgentPool,
+    goal: &str,
+    outcome: ProjectAssistantOutcome,
+    elapsed: std::time::Duration,
+) -> Vec<AgentRunResult> {
+    let mut recorded = agents.record_all_local(goal, &outcome.text);
+    if let (Some(run), Some(answer)) = (recorded.first_mut(), outcome.answer) {
+        run.elapsed = elapsed;
+        run.input_tokens = answer.input_tokens;
+        run.output_tokens = answer.output_tokens;
+        run.result = Ok(answer);
+    }
+    recorded
+}
+
+fn project_synthesis_error_label(changed_paths: &[String]) -> &'static str {
+    if changed_paths.is_empty() {
+        "Project исследовал файлы, но итоговый ответ не сформирован:"
+    } else {
+        "Project write выполнен, но синтез ответа завершился ошибкой:"
+    }
+}
+
 fn parse_confirmation(value: &str) -> Option<bool> {
     match value.trim().to_lowercase().as_str() {
         "да" | "д" | "yes" | "y" => Some(true),
@@ -89,13 +117,62 @@ impl ToolApproval for InteractiveToolApproval {
     }
 }
 
+impl ToolApproval for InteractiveProjectApproval {
+    fn approve(&self, definition: &ToolDefinition, call: &ToolCall) -> Result<bool> {
+        anyhow::ensure!(
+            call.name == "project__write_file" && !definition.read_only,
+            "project approval получил неожиданный инструмент"
+        );
+        let preview = prepare_project_write_preview(&self.root, &call.arguments)?;
+        println!(
+            "{} {}",
+            style("Предложено изменение файла:").yellow().bold(),
+            style(&preview.path).cyan().bold()
+        );
+        println!("  Режим: {:?}", preview.mode);
+        println!(
+            "  SHA-256: {} -> {}",
+            preview.old_sha256.as_deref().unwrap_or("отсутствует"),
+            preview.new_sha256
+        );
+        println!("  Новый размер: {} байт", preview.bytes);
+        if preview.changed {
+            println!("{}", preview.diff);
+            if preview.diff_truncated {
+                println!("{}", style("Diff усечён по лимиту вывода.").yellow());
+            }
+        } else {
+            println!(
+                "{}",
+                style("Содержимое уже совпадает; запись будет no-op.").dim()
+            );
+        }
+        loop {
+            let answer: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Применить этот diff? Введите да или нет")
+                .default("нет".into())
+                .interact_text()
+                .context("не удалось получить подтверждение project write")?;
+            if let Some(approved) = parse_confirmation(&answer) {
+                return Ok(approved);
+            }
+            println!("{}", style("Введите «да» или «нет».").yellow());
+        }
+    }
+}
+
 #[cfg(test)]
 mod approval_tests {
     use super::{
-        parse_confirmation, retrieval_config_for_request, retrieval_context_for_request,
+        parse_confirmation, prepare_project_write_preview, project_synthesis_error_label,
+        record_project_outcome, retrieval_config_for_request, retrieval_context_for_request,
         should_retrieve_for_request,
     };
-    use crate::{ActiveMemory, Message, RetrievalSourceScope};
+    use crate::{
+        ActiveMemory, AgentPool, AgentSettings, CompressionStrategy, Message,
+        ProjectAssistantOutcome, Provider, RetrievalSourceScope,
+    };
+    use reqwest::Client;
 
     #[test]
     fn mcp_confirmation_accepts_russian_and_english_answers() {
@@ -133,6 +210,76 @@ mod approval_tests {
         let project = retrieval_context_for_request(true, &history, &ActiveMemory::default());
         assert_eq!(ordinary.recent_user_messages, ["предыдущий вопрос"]);
         assert_eq!(project, crate::RetrievalContext::default());
+    }
+
+    #[test]
+    fn project_write_preview_rejects_invalid_arguments_without_raw_fallback() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = prepare_project_write_preview(
+            directory.path(),
+            &serde_json::json!({"path": "../escape", "mode": "create", "content": "x"}),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("пределы workspace"));
+    }
+
+    #[test]
+    fn project_session_records_only_clean_goal_and_visible_summary() {
+        let mut agents = AgentPool::new(
+            1,
+            Client::new(),
+            AgentSettings {
+                provider: Provider::Ollama,
+                api_key: None,
+                endpoint: None,
+                model: "test".into(),
+                temperature: 0.0,
+                instructions: None,
+                compression_strategy: CompressionStrategy::SlidingWindow,
+                context_messages: 10,
+            },
+        );
+        for (goal, text, error) in [
+            ("найди API", "Проверено: src/api.rs", None),
+            ("обнови README", "Изменено: README.md", None),
+            ("измени ADR", "Отменено: ADR.md", None),
+            (
+                "обнови changelog",
+                "Изменено: CHANGELOG.md\nОшибка итогового ответа: offline",
+                Some("offline".to_owned()),
+            ),
+        ] {
+            let outcome = ProjectAssistantOutcome {
+                answer: None,
+                text: text.into(),
+                error,
+                checked_paths: Vec::new(),
+                changed_paths: Vec::new(),
+                cancelled_paths: Vec::new(),
+            };
+            record_project_outcome(&mut agents, goal, outcome, std::time::Duration::ZERO);
+        }
+        let history = agents.persisted_history();
+        assert_eq!(history.len(), 8);
+        assert_eq!(history[0].content, "найди API");
+        assert_eq!(
+            history[7].content,
+            "Изменено: CHANGELOG.md\nОшибка итогового ответа: offline"
+        );
+        assert!(history.iter().all(|message| {
+            !message.content.contains("/project")
+                && !message.content.contains("project__")
+                && !message.content.contains("tool_calls")
+        }));
+    }
+
+    #[test]
+    fn project_error_message_does_not_claim_write_without_changed_paths() {
+        assert_eq!(
+            project_synthesis_error_label(&[]),
+            "Project исследовал файлы, но итоговый ответ не сформирован:"
+        );
+        assert!(project_synthesis_error_label(&["README.md".into()]).contains("write выполнен"));
     }
 }
 
@@ -236,6 +383,20 @@ pub(crate) async fn run() -> Result<()> {
         }
     };
     let help_tool_runtime = help_mcp_runtime.as_ref().map(HelpMcpRuntime::executor);
+    let project_mcp_runtime = match ProjectMcpRuntime::start(root.clone()).await {
+        Ok(runtime) => Some(runtime),
+        Err(error) => {
+            eprintln!(
+                "{} {error:#}",
+                style("Project file MCP недоступен; обычный чат и /help продолжат работу:")
+                    .yellow()
+            );
+            None
+        }
+    };
+    let project_tool_runtime = project_mcp_runtime
+        .as_ref()
+        .map(ProjectMcpRuntime::executor);
     agents.set_tool_runtime(tool_runtime.clone(), Arc::new(InteractiveToolApproval));
     agents.set_invariants(sessions.list_invariants()?);
     agents.set_memory(ActiveMemory {
@@ -283,7 +444,9 @@ pub(crate) async fn run() -> Result<()> {
         let _ = editor.add_history_entry(&input);
         let mut automatic_input = None;
         let mut project_help = false;
+        let mut project_work = false;
         let help_command = parse_help_command(&input);
+        let project_command = parse_project_command(&input);
         match input.as_str() {
             "/quit" => break,
             "/new" => {
@@ -738,6 +901,28 @@ pub(crate) async fn run() -> Result<()> {
                 project_help = true;
                 automatic_input = Some(question.to_owned());
             }
+            _command if matches!(project_command, ProjectCommand::Run(_)) => {
+                let ProjectCommand::Run(goal) = project_command else {
+                    unreachable!();
+                };
+                if project_tool_runtime.is_none() {
+                    eprintln!(
+                        "{}",
+                        style("Команда /project недоступна: внутренний файловый MCP не запущен.")
+                            .red()
+                    );
+                    continue;
+                }
+                project_work = true;
+                automatic_input = Some(goal.to_owned());
+            }
+            _command if matches!(project_command, ProjectCommand::ShowUsage) => {
+                println!(
+                    "{}",
+                    style("Использование: /project <цель работы с файлами проекта>").yellow()
+                );
+                continue;
+            }
             "/help" => {
                 print_help(config.compression_strategy == CompressionStrategy::Branching)?;
                 continue;
@@ -834,7 +1019,60 @@ pub(crate) async fn run() -> Result<()> {
                 .agents
                 .first()
                 .is_some_and(|agent| agent.branch_pending);
-            let mut results = if project_help {
+            let mut results = if project_work {
+                let started = Instant::now();
+                let outcome = run_project_file_subagent(
+                    &agents.agents[0],
+                    project_tool_runtime
+                        .clone()
+                        .context("project-only MCP недоступен")?,
+                    Arc::new(InteractiveProjectApproval { root: root.clone() }),
+                    &request_input,
+                )
+                .await;
+                match outcome {
+                    Ok(outcome) => {
+                        eprintln!(
+                            "{}",
+                            style(format!(
+                                "Project: проверено файлов {}, изменено {}.",
+                                outcome.checked_paths.len(),
+                                outcome.changed_paths.len()
+                            ))
+                            .dim()
+                        );
+                        if let Some(error) = &outcome.error {
+                            eprintln!(
+                                "{} {error}",
+                                style(project_synthesis_error_label(&outcome.changed_paths))
+                                    .yellow()
+                            );
+                        }
+                        if !outcome.cancelled_paths.is_empty() {
+                            eprintln!(
+                                "{} {}",
+                                style("Отменённые изменения:").yellow(),
+                                outcome.cancelled_paths.join(", ")
+                            );
+                        }
+                        record_project_outcome(
+                            &mut agents,
+                            &request_input,
+                            outcome,
+                            started.elapsed(),
+                        )
+                    }
+                    Err(error) => vec![AgentRunResult {
+                        agent_id: 1,
+                        elapsed: started.elapsed(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        session_input_tokens: 0,
+                        session_output_tokens: 0,
+                        result: Err(error),
+                    }],
+                }
+            } else if project_help {
                 let started = Instant::now();
                 let outcome = run_project_help_subagent(
                     &agents.agents[0],
@@ -1021,6 +1259,15 @@ pub(crate) async fn run() -> Result<()> {
         }
     }
     drop(help_tool_runtime);
+    drop(project_tool_runtime);
+    if let Some(runtime) = project_mcp_runtime {
+        if let Err(error) = runtime.shutdown().await {
+            eprintln!(
+                "{} {error:#}",
+                style("Не удалось корректно остановить project file MCP:").yellow()
+            );
+        }
+    }
     if let Some(runtime) = help_mcp_runtime {
         if let Err(error) = runtime.shutdown().await {
             eprintln!(

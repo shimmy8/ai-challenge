@@ -1887,9 +1887,10 @@ mod suite {
         let helper = CommandHelper::new(enabled.clone());
         let (start, candidates) = helper.complete("/pro", 4, &context).unwrap();
         assert_eq!(start, 0);
-        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates.len(), 3);
         assert_eq!(candidates[0].replacement, "/provider");
-        assert_eq!(candidates[1].replacement, "/profile");
+        assert_eq!(candidates[1].replacement, "/project");
+        assert_eq!(candidates[2].replacement, "/profile");
         assert_eq!(helper.hint("/pro", 4, &context), None);
         assert_eq!(helper.hint("/prov", 5, &context).as_deref(), Some("ider"));
         assert!(helper.complete("/bra", 4, &context).unwrap().1.is_empty());

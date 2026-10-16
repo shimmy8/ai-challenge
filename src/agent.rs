@@ -385,6 +385,7 @@ pub(crate) struct Agent {
     pub(crate) tool_executor: Option<SharedToolExecutor>,
     pub(crate) tool_approval: SharedToolApproval,
     tool_timeout: Duration,
+    max_tool_calls_per_request: usize,
     advertise_pipeline_tool: bool,
     executed_tool_results: Vec<(ToolCall, ToolResult)>,
 }
@@ -412,6 +413,7 @@ impl Agent {
             tool_executor: None,
             tool_approval: Arc::new(AutoApprove),
             tool_timeout: DEFAULT_MCP_TOOL_TIMEOUT,
+            max_tool_calls_per_request: MAX_MCP_CALLS_PER_REQUEST,
             advertise_pipeline_tool: true,
             executed_tool_results: Vec::new(),
         }
@@ -737,9 +739,10 @@ impl Agent {
         self.session_output_tokens += answer.output_tokens;
         let mut tool_calls_count = 0;
         while !answer.tool_calls.is_empty() {
-            if tool_calls_count + answer.tool_calls.len() > MAX_MCP_CALLS_PER_REQUEST {
+            if tool_calls_count + answer.tool_calls.len() > self.max_tool_calls_per_request {
                 bail!(
-                    "достигнут лимит MCP-вызовов для одного запроса ({MAX_MCP_CALLS_PER_REQUEST})"
+                    "достигнут лимит MCP-вызовов для одного запроса ({})",
+                    self.max_tool_calls_per_request
                 );
             }
             let mut results = Vec::with_capacity(answer.tool_calls.len());
@@ -1664,6 +1667,10 @@ impl Agent {
 
     pub(crate) fn set_pipeline_tool_enabled(&mut self, enabled: bool) {
         self.advertise_pipeline_tool = enabled;
+    }
+
+    pub(crate) fn set_max_tool_calls_per_request(&mut self, limit: usize) {
+        self.max_tool_calls_per_request = limit.max(1);
     }
 
     pub(crate) fn take_executed_tool_results(&mut self) -> Vec<(ToolCall, ToolResult)> {
