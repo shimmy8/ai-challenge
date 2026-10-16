@@ -20,9 +20,12 @@ use super::{
     calculate_github_metrics, render_github_report, save_report_in_directory, CalDavClient,
     CalculateGithubMetricsRequest, CalendarDigestEvent, CalendarEventRequest, CalendarEventResult,
     CodeGraphExploreRequest, GithubActivityRequest, GithubClient, GithubMetrics,
-    GithubProjectActivity, GithubRepositoryMetadata, GithubRepositoryRequest, McpServerKind,
-    RenderGithubReportRequest, SaveReportRequest, SaveReportResult, TelegramClient,
-    TelegramOutcome, ToolOutcome, WorkspaceInspector,
+    GithubProjectActivity, GithubRepositoryMetadata, GithubRepositoryRequest,
+    ListProjectFilesRequest, ListProjectFilesResult, McpServerKind, ProjectGitDiffRequest,
+    ProjectGitDiffResult, ProjectWorkspace, ReadProjectFileRequest, ReadProjectFileResult,
+    RenderGithubReportRequest, SaveReportRequest, SaveReportResult, SearchProjectFilesRequest,
+    SearchProjectFilesResult, TelegramClient, TelegramOutcome, ToolOutcome, WorkspaceInspector,
+    WriteProjectFileRequest, WriteProjectFileResult,
 };
 use crate::{send_request, AgentSettings, Config, Message, Provider, RequestOptions};
 
@@ -334,6 +337,143 @@ impl HelpWorkspaceServer {
 }
 
 impl_logged_server_handler!(HelpWorkspaceServer, "project-help");
+
+#[derive(Clone)]
+struct ProjectWorkspaceServer {
+    tool_router: ToolRouter<Self>,
+    workspace: ProjectWorkspace,
+    inspector: WorkspaceInspector,
+}
+
+impl ProjectWorkspaceServer {
+    fn new(root: PathBuf) -> Result<Self> {
+        Ok(Self {
+            tool_router: Self::tool_router(),
+            workspace: ProjectWorkspace::new(root.clone())?,
+            inspector: WorkspaceInspector::new(root),
+        })
+    }
+}
+
+#[tool_router(router = tool_router)]
+impl ProjectWorkspaceServer {
+    #[tool(
+        name = "list_files",
+        description = "Возвращает ограниченный стабильный список доступных файлов текущего проекта",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    fn list_files(
+        &self,
+        Parameters(request): Parameters<ListProjectFilesRequest>,
+    ) -> Result<Json<ListProjectFilesResult>, rmcp::ErrorData> {
+        self.workspace
+            .list_files(&request)
+            .map(Json)
+            .map_err(tool_error)
+    }
+
+    #[tool(
+        name = "search_files",
+        description = "Ищет literal UTF-8 строку в доступных файлах проекта и возвращает пути и строки",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    fn search_files(
+        &self,
+        Parameters(request): Parameters<SearchProjectFilesRequest>,
+    ) -> Result<Json<SearchProjectFilesResult>, rmcp::ErrorData> {
+        self.workspace
+            .search_files(&request)
+            .map(Json)
+            .map_err(tool_error)
+    }
+
+    #[tool(
+        name = "read_file",
+        description = "Читает диапазон строк UTF-8 файла проекта и возвращает SHA-256 всей версии",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    fn read_file(
+        &self,
+        Parameters(request): Parameters<ReadProjectFileRequest>,
+    ) -> Result<Json<ReadProjectFileResult>, rmcp::ErrorData> {
+        self.workspace
+            .read_file(&request)
+            .map(Json)
+            .map_err(tool_error)
+    }
+
+    #[tool(
+        name = "write_file",
+        description = "Создаёт или заменяет подтверждённый UTF-8 файл с hash precondition и unified diff",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        )
+    )]
+    fn write_file(
+        &self,
+        Parameters(request): Parameters<WriteProjectFileRequest>,
+    ) -> Result<Json<WriteProjectFileResult>, rmcp::ErrorData> {
+        self.workspace
+            .write_file(&request)
+            .map(Json)
+            .map_err(tool_error)
+    }
+
+    #[tool(
+        name = "git_diff",
+        description = "Возвращает ограниченный Git diff допустимых файлов текущего workspace",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    fn git_diff(
+        &self,
+        Parameters(request): Parameters<ProjectGitDiffRequest>,
+    ) -> Result<Json<ProjectGitDiffResult>, rmcp::ErrorData> {
+        self.workspace
+            .git_diff(&request)
+            .map(Json)
+            .map_err(tool_error)
+    }
+
+    #[tool(
+        name = "codegraph_explore",
+        description = "Исследует структуру и связи кода текущего проекта через локальный CodeGraph",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn codegraph_explore(
+        &self,
+        Parameters(request): Parameters<CodeGraphExploreRequest>,
+    ) -> Result<Json<super::CodeGraphExploreResult>, rmcp::ErrorData> {
+        self.inspector
+            .codegraph_explore(&request.question)
+            .await
+            .map(Json)
+            .map_err(tool_error)
+    }
+}
+
+impl_logged_server_handler!(ProjectWorkspaceServer, "project");
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -717,6 +857,26 @@ pub(crate) async fn serve_help_workspace(
         .context("help-only MCP-сервер завершился с ошибкой")
 }
 
+pub(crate) async fn serve_project_workspace(
+    listener: TcpListener,
+    workspace: PathBuf,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> Result<()> {
+    let factory = ProjectWorkspaceServer::new(workspace)?;
+    let service = StreamableHttpService::new(
+        move || Ok(factory.clone()),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default(),
+    );
+    let router = axum::Router::new().nest_service("/mcp", service);
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown.await;
+        })
+        .await
+        .context("project-only MCP-сервер завершился с ошибкой")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,6 +927,41 @@ mod tests {
             let annotations = tool.attr.annotations.as_ref().unwrap();
             assert_eq!(annotations.read_only_hint, Some(true));
             assert_eq!(annotations.destructive_hint, Some(false));
+        }
+    }
+
+    #[test]
+    fn project_workspace_router_exposes_only_bounded_project_tools() {
+        let directory = tempfile::tempdir().unwrap();
+        let server = ProjectWorkspaceServer::new(directory.path().to_path_buf()).unwrap();
+        assert_eq!(
+            server
+                .tool_router
+                .map
+                .keys()
+                .map(|name| name.as_ref())
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                "codegraph_explore",
+                "git_diff",
+                "list_files",
+                "read_file",
+                "search_files",
+                "write_file",
+            ]
+            .into_iter()
+            .collect()
+        );
+        for (name, tool) in &server.tool_router.map {
+            let annotations = tool.attr.annotations.as_ref().unwrap();
+            assert_eq!(
+                annotations.destructive_hint,
+                Some(name.as_ref() == "write_file")
+            );
+            assert_eq!(
+                annotations.read_only_hint,
+                Some(name.as_ref() != "write_file")
+            );
         }
     }
 
