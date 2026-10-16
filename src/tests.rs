@@ -1414,6 +1414,23 @@ mod suite {
         );
         assert_eq!(
             parse_startup_mode(vec![
+                "support".into(),
+                "--addr".into(),
+                "127.0.0.1:8088".into(),
+                "--ticket-db".into(),
+                "tickets.db".into(),
+                "--index-path".into(),
+                "linkding.db".into(),
+            ])
+            .unwrap(),
+            StartupMode::Support(crate::support::SupportOptions {
+                addr: "127.0.0.1:8088".parse().unwrap(),
+                ticket_db: "tickets.db".into(),
+                index_path: "linkding.db".into(),
+            })
+        );
+        assert_eq!(
+            parse_startup_mode(vec![
                 "index".into(),
                 "--source".into(),
                 "reports".into(),
@@ -1483,6 +1500,17 @@ mod suite {
                 retrieval: RetrievalConfig::default(),
             })
         );
+    }
+
+    #[test]
+    fn read_only_config_load_never_migrates_legacy_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.json");
+        let raw = r#"{"last_provider":"ollama","openai_api_key":null,"claude_api_key":null,"openai_model":"gpt-test","claude_model":"claude-test"}"#;
+        fs::write(&path, raw).unwrap();
+        let config = Config::load_read_only(&path).unwrap();
+        assert_eq!(config.last_provider, Some(Provider::Ollama));
+        assert_eq!(fs::read_to_string(path).unwrap(), raw);
     }
 
     #[test]
